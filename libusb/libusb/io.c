@@ -2753,7 +2753,7 @@ DEFAULT_VISIBILITY
 const struct libusb_pollfd ** LIBUSB_CALL libusb_get_pollfds(
 	libusb_context *ctx)
 {
-#if !defined(PLATFORM_WINDOWS)
+#if !defined(PLATFORM_WINDOWS) && !defined(PLATFORM_CPP_STL)
 	struct libusb_pollfd **ret = NULL;
 	struct usbi_event_source *ievent_source;
 	size_t i;
@@ -2782,7 +2782,7 @@ out:
 	return (const struct libusb_pollfd **)ret;
 #else
 	usbi_err(ctx, "external polling of libusb's internal event sources " \
-		"is not yet supported on Windows");
+		"is not yet supported on this platform");
 	return NULL;
 #endif
 }

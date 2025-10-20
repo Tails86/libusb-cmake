@@ -1,0 +1,139 @@
+#include "libusbi.h"
+
+#include <mutex>
+#include <condition_variable>
+#include <thread>
+#include <memory>
+#include <list>
+
+static std::mutex static_mutex;
+
+struct cpp_stl_usbi_mutex_static
+{
+    std::mutex mtx;
+};
+
+// This is here just to ensure these mutexes are properly deleted on program exit
+static std::list<std::unique_ptr<cpp_stl_usbi_mutex_static>> static_mutex_list;
+
+static usbi_mutex_static_t new_usbi_mutex_static()
+{
+    auto unique_static_mutex = std::unique_ptr<cpp_stl_usbi_mutex_static>(new cpp_stl_usbi_mutex_static);
+    usbi_mutex_static_t static_mutex = unique_static_mutex.get();
+    static_mutex_list.push_back(std::move(unique_static_mutex));
+    return static_mutex;
+}
+
+void usbi_mutex_static_lock(usbi_mutex_static_t *mutex)
+{
+    {
+        // Need to serialize check-and-set logic
+        std::lock_guard<std::mutex> lock(static_mutex);
+        if (!(*mutex))
+        {
+            (*mutex) = new_usbi_mutex_static();
+        }
+    }
+
+    (*mutex)->mtx.lock();
+}
+void usbi_mutex_static_unlock(usbi_mutex_static_t *mutex)
+{
+    // TODO: assert (*mutex) is not null (assume usbi_mutex_static_lock previously called)
+    (*mutex)->mtx.unlock();
+}
+
+struct cpp_stl_usbi_mutex
+{
+    std::mutex mtx;
+};
+
+void usbi_mutex_init(usbi_mutex_t *mutex)
+{
+	*mutex = new cpp_stl_usbi_mutex();
+}
+void usbi_mutex_lock(usbi_mutex_t *mutex)
+{
+	(*mutex)->mtx.lock();
+}
+void usbi_mutex_unlock(usbi_mutex_t *mutex)
+{
+	(*mutex)->mtx.unlock();
+}
+int usbi_mutex_trylock(usbi_mutex_t *mutex)
+{
+	return (*mutex)->mtx.try_lock();
+}
+void usbi_mutex_destroy(usbi_mutex_t *mutex)
+{
+	delete (*mutex);
+    (*mutex) = nullptr;
+}
+
+struct cpp_stl_usbi_cond
+{
+    std::condition_variable cv;
+};
+
+void usbi_cond_init(usbi_cond_t *cond)
+{
+	(*cond) = new cpp_stl_usbi_cond();
+}
+void usbi_cond_wait(usbi_cond_t *cond, usbi_mutex_t *mutex)
+{
+	std::unique_lock<std::mutex> lock((*mutex)->mtx, std::adopt_lock);
+    (*cond)->cv.wait(lock); // TODO: from STL documentation, this may spurriously wake. Is this ok?
+}
+int usbi_cond_timedwait(usbi_cond_t *cond, usbi_mutex_t *mutex, const struct timeval *tv)
+{
+	std::unique_lock<std::mutex> lock((*mutex)->mtx, std::adopt_lock);
+    std::cv_status status = (*cond)->cv.wait_for(
+        lock,
+        std::chrono::seconds(tv->tv_sec) + std::chrono::microseconds(tv->tv_usec)
+    );
+
+    return ((status == std::cv_status::timeout) ? LIBUSB_ERROR_TIMEOUT : 0);
+}
+void usbi_cond_broadcast(usbi_cond_t *cond)
+{
+	(*cond)->cv.notify_all();
+}
+void usbi_cond_destroy(usbi_cond_t *cond)
+{
+	delete (*cond);
+    (*cond) = nullptr;
+}
+
+struct cpp_stl_usbi_tls
+{
+    std::mutex mtx;
+    void* ptr;
+};
+
+void usbi_tls_key_create(usbi_tls_key_t *key)
+{
+	(*key) = new cpp_stl_usbi_tls();
+}
+void *usbi_tls_key_get(usbi_tls_key_t key)
+{
+	std::lock_guard<std::mutex> lock(key->mtx);
+    return key->ptr;
+}
+void usbi_tls_key_set(usbi_tls_key_t key, void *ptr)
+{
+	std::lock_guard<std::mutex> lock(key->mtx);
+    key->ptr = ptr;
+}
+void usbi_tls_key_delete(usbi_tls_key_t key)
+{
+	delete key;
+    key = nullptr;
+}
+
+size_t usbi_get_tid()
+{
+    const std::thread::id id = std::this_thread::get_id();
+    return std::hash<std::thread::id>{}(id);
+}
+
+

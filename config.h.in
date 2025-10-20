@@ -52,6 +52,9 @@
 /* #define to 1 if compiling for a Windows platform. */
 #cmakedefine PLATFORM_WINDOWS 1
 
+/* #define to 1 if compiling for a platform using C++ STL functions. */
+#cmakedefine PLATFORM_CPP_STL 1
+
 
 #if defined(__GNUC__)
  #define PRINTF_FORMAT(a, b) __attribute__ ((format (__printf__, a, b)))
