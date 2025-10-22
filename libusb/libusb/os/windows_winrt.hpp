@@ -1,8 +1,31 @@
+/*
+ * windows hotplug backend for libusb 1.0
+ * Copyright © 2025 James Smith <jmsmith86@gmail.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ */
 
 #ifndef LIBUSB_WINDOWS_WINRT_H
 #define LIBUSB_WINDOWS_WINRT_H
 
 #include "libusbi.h"
+
+#include <string>
+#include <unordered_map>
+#include <winrt/base.h>
+#include <winrt/Windows.Devices.Usb.h>
 
 // Events
 
@@ -10,33 +33,17 @@
 // private structures
 struct winrt_context_priv
 {
-	// const struct windows_backend *backend;
-	// HANDLE completion_port;
-	// HANDLE completion_port_thread;
-};
-
-struct winrt_cached_device
-{
-//   struct list_head      list;
-//   IOUSBDeviceDescriptor dev_descriptor;
-//   UInt32                location;
-//   UInt64                parent_session;
-//   UInt64                session;
-//   USBDeviceAddress      address;
-//   char                  sys_path[21];
-//   usb_device_t          device;
-//   io_service_t          service;
-//   int                   open_count;
-//   UInt8                 first_config, active_config, port;
-//   int                   can_enumerate;
-//   int                   refcount;
-//   bool                  in_reenumerate;
-//   int                   capture_count;
+	// Nothing needed here yet
 };
 
 struct winrt_device_priv
 {
-  winrt_cached_device *dev;
+	//! String representation of System.Devices.ContainerId for this device
+	std::wstring container_id;
+	// Because of the way winrt is setup, a UsbDevice must be claimed to perform any operation
+	winrt::Windows::Devices::Usb::UsbDevice default_device;
+	//! Maps interface numbers to claimed interfaces
+	std::unordered_map<uint8_t, winrt::Windows::Devices::Usb::UsbDevice> claimed_interfaces;
 };
 
 struct winrt_interface
