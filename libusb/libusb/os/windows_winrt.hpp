@@ -24,6 +24,8 @@
 
 #include <string>
 #include <unordered_map>
+#include <list>
+#include <mutex>
 #include <winrt/base.h>
 #include <winrt/Windows.Devices.Usb.h>
 
@@ -33,34 +35,34 @@
 // private structures
 struct winrt_context_priv
 {
-	// Nothing needed here yet
+    // Nothing needed here yet
 };
 
 struct winrt_device_priv
 {
-	//! String representation of System.Devices.ContainerId for this device
-	std::wstring container_id;
-	// Because of the way winrt is setup, a UsbDevice must be claimed to perform any operation
-	winrt::Windows::Devices::Usb::UsbDevice default_device;
-	//! Maps interface numbers to claimed interfaces
-	std::unordered_map<uint8_t, winrt::Windows::Devices::Usb::UsbDevice> claimed_interfaces;
+    //! String representation of System.Devices.ContainerId for this device
+    std::wstring container_id;
+    // Because of the way winrt is setup, a UsbDevice must be claimed to perform any operation
+    winrt::Windows::Devices::Usb::UsbDevice default_device = nullptr;
+
+    // Queue of control transfers in progress (top of queue is currently active one)
+    std::list<usbi_transfer*> control_transfer_queue;
+    // Mutex serializing the above queue
+    std::mutex control_transfer_queue_mutex;
 };
 
 struct winrt_interface
 {
-//  usb_interface_t      interface;
-//   uint8_t              num_endpoints;
-//   CFRunLoopSourceRef   cfSource;
-//   uint64_t             frames[256];
-//   uint8_t              endpoint_addrs[USB_MAXENDPOINTS];
+    winrt::Windows::Devices::Usb::UsbDevice device;
+    std::unordered_map<uint8_t, winrt::Windows::Devices::Usb::UsbBulkInPipe> bulk_in_pipes;
+    std::unordered_map<uint8_t, winrt::Windows::Devices::Usb::UsbBulkOutPipe> bulk_out_pipes;
+    std::unordered_map<uint8_t, winrt::Windows::Devices::Usb::UsbInterruptInPipe> interrupt_in_pipes;
+    std::unordered_map<uint8_t, winrt::Windows::Devices::Usb::UsbInterruptOutPipe> interrupt_out_pipes;
 };
 
 struct winrt_device_handle_priv
 {
-//   bool                 is_open;
-//   CFRunLoopSourceRef   cfSource;
-
-   winrt_interface interfaces[USB_MAXINTERFACES];
+    std::unordered_map<uint8_t, winrt_interface> interfaces;
 };
 
 struct winrt_transfer_priv
