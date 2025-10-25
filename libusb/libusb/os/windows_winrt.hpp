@@ -31,13 +31,12 @@
 #include <winrt/base.h>
 #include <winrt/Windows.Devices.Usb.h>
 
-// Events
-
-
 // private structures
 struct winrt_context_priv
 {
-    // Nothing needed here yet
+    std::mutex container_id_to_session_id_mutex;
+    std::unordered_map<winrt::guid, unsigned long> container_id_to_session_id_map;
+    unsigned long last_session_id = 0;
 };
 
 struct winrt_transfer_queue

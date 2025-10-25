@@ -160,7 +160,9 @@ int usbi_wait_for_events(struct libusb_context *ctx, struct usbi_reported_events
 
 	usbi_dbg(ctx, "wait for %lu HANDLEs with timeout in %dms", static_cast<unsigned long>(num_handles), timeout_ms);
 
+    // This value will remain 0 because events don't need to be handled by back end
     reported_events->num_ready = 0;
+
     reported_events->event_triggered = 0;
 
 #ifdef HAVE_OS_TIMER
@@ -204,7 +206,6 @@ int usbi_wait_for_events(struct libusb_context *ctx, struct usbi_reported_events
                 {
                     trigger = true;
                     reported_events->event_triggered = 1;
-                    ++reported_events->num_ready;
                 }
 
                 return trigger;
@@ -215,7 +216,6 @@ int usbi_wait_for_events(struct libusb_context *ctx, struct usbi_reported_events
         if (!status && timerElapsedOnTimeout)
         {
             reported_events->timer_triggered = 1;
-            ++reported_events->num_ready;
             status = true;
         }
         else if (status && usbi_using_timer(ctx))
@@ -227,7 +227,6 @@ int usbi_wait_for_events(struct libusb_context *ctx, struct usbi_reported_events
                 if (now >= tmr->time)
                 {
                     reported_events->timer_triggered = 1;
-                    ++reported_events->num_ready;
                 }
             }
         }
