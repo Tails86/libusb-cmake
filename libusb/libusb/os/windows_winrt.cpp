@@ -191,7 +191,7 @@ static int winrt_get_device_list(struct libusb_context *ctx, struct discovered_d
                 setupPacket.RequestType().Direction(UsbTransferDirection::In);
                 setupPacket.RequestType().ControlTransferType(UsbControlTransferType::Standard);
                 setupPacket.RequestType().Recipient(UsbControlRecipient::Device);
-                setupPacket.Request(0x06); // GET_DESCRIPTOR
+                setupPacket.Request(LIBUSB_REQUEST_GET_DESCRIPTOR);
                 setupPacket.Value((LIBUSB_DT_DEVICE << 8) | 0); // Device descriptor, index 0
                 setupPacket.Index(0);
                 setupPacket.Length(LIBUSB_DT_DEVICE_SIZE);
@@ -286,22 +286,52 @@ static int winrt_open(struct libusb_device_handle *dev_handle)
             priv->default_device = winrtDev;
             priv->default_device_id = deviceInfo.Id();
 
+            // Get the active configuration number
+            auto setupPacket = UsbSetupPacket();
+            setupPacket.RequestType().Direction(UsbTransferDirection::In);
+            setupPacket.RequestType().ControlTransferType(UsbControlTransferType::Standard);
+            setupPacket.RequestType().Recipient(UsbControlRecipient::Device);
+            setupPacket.Request(LIBUSB_REQUEST_GET_CONFIGURATION);
+            setupPacket.Value(0);
+            setupPacket.Index(0);
+            setupPacket.Length(1);
+
+            auto outputBuffer = Streams::Buffer(LIBUSB_DT_CONFIG_SIZE);
+            auto ibuf = winrt_async_get<Streams::IBuffer>(
+                [&]()
+                {
+                    return winrtDev.SendControlInTransferAsync(setupPacket, outputBuffer).get();
+                }
+            );
+
+            if (!ibuf)
+            {
+                commFail = true;
+                // Try next device
+                continue;
+            }
+
+            auto dataReader = winrt::Windows::Storage::Streams::DataReader::FromBuffer(ibuf);
+            std::vector<uint8_t> activeConfigData(1);
+            dataReader.ReadBytes(activeConfigData);
+            priv->active_config = activeConfigData[0];
+
             priv->config_descriptors.resize(dev_handle->dev->device_descriptor.bNumConfigurations);
             for (uint8_t i = 0; i < dev_handle->dev->device_descriptor.bNumConfigurations; ++i)
             {
                 // The data within winrtDev.Configuration().Descriptors() is often incorrect for some reason.
                 // The best bet is to simply send a control transfer.
-                auto setupPacket = UsbSetupPacket();
+                setupPacket = UsbSetupPacket();
                 setupPacket.RequestType().Direction(UsbTransferDirection::In);
                 setupPacket.RequestType().ControlTransferType(UsbControlTransferType::Standard);
                 setupPacket.RequestType().Recipient(UsbControlRecipient::Device);
-                setupPacket.Request(0x06); // GET_DESCRIPTOR
+                setupPacket.Request(LIBUSB_REQUEST_GET_DESCRIPTOR);
                 setupPacket.Value((LIBUSB_DT_CONFIG << 8) | i); // configuration descriptor with index
                 setupPacket.Index(0);
                 setupPacket.Length(LIBUSB_DT_CONFIG_SIZE);
 
-                auto outputBuffer = Streams::Buffer(LIBUSB_DT_CONFIG_SIZE);
-                auto ibuf = winrt_async_get<Streams::IBuffer>(
+                outputBuffer = Streams::Buffer(LIBUSB_DT_CONFIG_SIZE);
+                ibuf = winrt_async_get<Streams::IBuffer>(
                     [&]()
                     {
                         return winrtDev.SendControlInTransferAsync(setupPacket, outputBuffer).get();
@@ -315,7 +345,7 @@ static int winrt_open(struct libusb_device_handle *dev_handle)
                     continue;
                 }
 
-                auto dataReader = winrt::Windows::Storage::Streams::DataReader::FromBuffer(ibuf);
+                dataReader = winrt::Windows::Storage::Streams::DataReader::FromBuffer(ibuf);
                 priv->config_descriptors[i].resize(ibuf.Length());
                 dataReader.ReadBytes(priv->config_descriptors[i]);
 
@@ -390,6 +420,7 @@ static int winrt_get_active_config_descriptor(struct libusb_device *dev, void *b
 
 static int winrt_get_config_descriptor(struct libusb_device *dev, uint8_t config_index, void *buffer, size_t len)
 {
+    // TODO
     return LIBUSB_ERROR_IO;
 }
 
@@ -403,8 +434,39 @@ static int winrt_get_configuration(struct libusb_device_handle *dev_handle, uint
 
 static int winrt_set_configuration(struct libusb_device_handle *dev_handle, int config)
 {
-    // I haven't been able to find a way to support this yet
-    return LIBUSB_ERROR_NOT_SUPPORTED;
+	winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(dev_handle->dev));
+
+    if (!priv->default_device)
+    {
+        return LIBUSB_ERROR_NO_DEVICE;
+    }
+
+    // Get the active configuration number
+    auto setupPacket = UsbSetupPacket();
+    setupPacket.RequestType().Direction(UsbTransferDirection::Out);
+    setupPacket.RequestType().ControlTransferType(UsbControlTransferType::Standard);
+    setupPacket.RequestType().Recipient(UsbControlRecipient::Device);
+    setupPacket.Request(LIBUSB_REQUEST_SET_CONFIGURATION);
+    setupPacket.Value(config);
+    setupPacket.Index(0);
+    setupPacket.Length(0);
+
+    auto outputBuffer = Streams::Buffer(LIBUSB_DT_CONFIG_SIZE);
+    auto ibuf = winrt_async_get<Streams::IBuffer>(
+        [&]()
+        {
+            return priv->default_device.SendControlInTransferAsync(setupPacket, outputBuffer).get();
+        }
+    );
+
+    if (!ibuf)
+    {
+        return LIBUSB_ERROR_IO;
+    }
+
+	priv->active_config = config;
+
+	return LIBUSB_SUCCESS;
 }
 
 static int winrt_claim_interface(struct libusb_device_handle *dev_handle, uint8_t iface)
