@@ -1058,11 +1058,12 @@ static int winrt_handle_transfer_completion(struct usbi_transfer *itransfer)
 
 static int winrt_cancel_transfer_from_queue(usbi_transfer *itransfer, winrt_transfer_queue& queue)
 {
+    winrt_transfer_priv *tpriv = static_cast<winrt_transfer_priv*>(usbi_get_transfer_priv(itransfer));
+
     std::unique_lock<std::mutex> lock(queue.transfer_mutex);
 
     if (queue.active_transfer == itransfer)
     {
-        winrt_transfer_priv *tpriv = static_cast<winrt_transfer_priv*>(usbi_get_transfer_priv(itransfer));
 
         if (tpriv->cancel_fn)
         {
@@ -1086,7 +1087,8 @@ static int winrt_cancel_transfer_from_queue(usbi_transfer *itransfer, winrt_tran
             lock.unlock();
 
             winrt_context_priv *pctx = static_cast<winrt_context_priv*>(usbi_get_context_priv(itransfer->dev->ctx));
-            pctx->canceled_floating_transfers.push_back(itransfer);
+            tpriv->status = LIBUSB_TRANSFER_CANCELLED;
+            usbi_signal_transfer_completion(itransfer);
 
             return LIBUSB_SUCCESS;
         }
@@ -1119,13 +1121,6 @@ static int winrt_cancel_transfer(struct usbi_transfer *itransfer)
 
 int winrt_handle_events(struct libusb_context *ctx, void *event_data, unsigned int count, unsigned int num_ready)
 {
-    winrt_context_priv *pctx = static_cast<winrt_context_priv*>(usbi_get_context_priv(ctx));
-    while (!pctx->canceled_floating_transfers.empty())
-    {
-        usbi_transfer *itransfer = pctx->canceled_floating_transfers.front();
-        pctx->canceled_floating_transfers.pop_front();
-        usbi_handle_transfer_cancellation(itransfer);
-    }
     return LIBUSB_SUCCESS;
 }
 

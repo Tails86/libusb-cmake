@@ -37,7 +37,7 @@
 // private structures
 struct winrt_context_priv
 {
-    std::list<usbi_transfer*> canceled_floating_transfers;
+    // Nothing needed here yet
 };
 
 struct winrt_transfer_queue

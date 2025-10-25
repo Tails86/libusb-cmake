@@ -164,21 +164,24 @@ int usbi_wait_for_events(struct libusb_context *ctx, struct usbi_reported_events
 #ifdef HAVE_OS_TIMER
     reported_events->timer_triggered = 0;
     bool timerElapsedOnTimeout = false;
-    if (num_handles > 1)
+    if (usbi_using_timer(ctx))
     {
-        cpp_stl_usbi_timer *tmr = static_cast<cpp_stl_usbi_timer*>(handles[1]);
-        if (tmr->armed)
+        if (num_handles > 1)
         {
-            auto now = std::chrono::steady_clock::now();
-            std::chrono::milliseconds tmrTimeoutMs(0);
-            if (tmr->time > now)
+            cpp_stl_usbi_timer *tmr = static_cast<cpp_stl_usbi_timer*>(handles[1]);
+            if (tmr->armed)
             {
-                tmrTimeoutMs = std::chrono::duration_cast<std::chrono::milliseconds>(tmr->time - now);
-            }
-            if (tmrTimeoutMs.count() <= timeout_ms)
-            {
-                timerElapsedOnTimeout = true;
-                timeout_ms = tmrTimeoutMs.count();
+                auto now = std::chrono::steady_clock::now();
+                std::chrono::milliseconds tmrTimeoutMs(0);
+                if (tmr->time > now)
+                {
+                    tmrTimeoutMs = std::chrono::duration_cast<std::chrono::milliseconds>(tmr->time - now);
+                }
+                if (tmrTimeoutMs.count() <= timeout_ms)
+                {
+                    timerElapsedOnTimeout = true;
+                    timeout_ms = tmrTimeoutMs.count();
+                }
             }
         }
     }
@@ -212,6 +215,19 @@ int usbi_wait_for_events(struct libusb_context *ctx, struct usbi_reported_events
             reported_events->timer_triggered = 1;
             ++reported_events->num_ready;
             status = true;
+        }
+        else if (status && usbi_using_timer(ctx))
+        {
+            cpp_stl_usbi_timer *tmr = static_cast<cpp_stl_usbi_timer*>(handles[1]);
+            if (tmr->armed)
+            {
+                auto now = std::chrono::steady_clock::now();
+                if (now >= tmr->time)
+                {
+                    reported_events->timer_triggered = 1;
+                    ++reported_events->num_ready;
+                }
+            }
         }
 #endif
 
