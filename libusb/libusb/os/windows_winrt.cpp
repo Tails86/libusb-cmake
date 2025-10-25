@@ -1306,7 +1306,7 @@ static int winrt_cancel_transfer(usbi_transfer *itransfer)
 
 const usbi_os_backend usbi_backend = {
     "winrt", // name
-    USBI_CAP_SUPPORTS_DETACH_KERNEL_DRIVER, // caps
+    USBI_CAP_HAS_HID_ACCESS, // caps (but probably won't be able to open any of them)
     winrt_init, // init
     winrt_exit, // exit
     NULL, // set_option
