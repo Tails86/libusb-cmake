@@ -1,5 +1,5 @@
 /*
- * windows hotplug backend for libusb 1.0
+ * C++ STL threading backend for libusb 1.0
  * Copyright © 2025 James Smith <jmsmith86@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
