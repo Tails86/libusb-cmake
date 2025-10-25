@@ -286,6 +286,7 @@ static int winrt_open(struct libusb_device_handle *dev_handle)
         if (winrtDev)
         {
             priv->default_device = winrtDev;
+            priv->default_device_id = deviceInfo.Id();
 
             priv->config_descriptors.resize(dev_handle->dev->device_descriptor.bNumConfigurations);
             for (uint8_t i = 0; i < dev_handle->dev->device_descriptor.bNumConfigurations; ++i)
@@ -460,16 +461,28 @@ static int winrt_claim_interface(struct libusb_device_handle *dev_handle, uint8_
     // Try connecting to each until one succeeds.
     for (const auto& deviceInfo : deviceInfos)
     {
-        UsbDevice winrtDev = winrt_async_get<UsbDevice>(
-            [&deviceInfo]()
-            {
-                return UsbDevice::FromIdAsync(deviceInfo.Id()).get();
-            }
-        );
+        std::wstring id(deviceInfo.Id());
+        UsbDevice winrtDev = nullptr;
+        bool isDefaultDevice = false;
+
+        if (id == priv->default_device_id)
+        {
+            winrtDev = priv->default_device;
+            isDefaultDevice = true;
+        }
+        else
+        {
+            winrtDev = winrt_async_get<UsbDevice>(
+                [&deviceInfo]()
+                {
+                    return UsbDevice::FromIdAsync(deviceInfo.Id()).get();
+                }
+            );
+        }
 
         if (winrtDev)
         {
-            winrt_interface itfDef{winrtDev};
+            winrt_interface itfDef{winrtDev, id};
             for (auto& bulkEpIn: winrtDev.DefaultInterface().BulkInPipes())
             {
                 itfDef.bulk_in_pipes.insert_or_assign(bulkEpIn.EndpointDescriptor().EndpointNumber(), std::move(bulkEpIn));
@@ -489,12 +502,14 @@ static int winrt_claim_interface(struct libusb_device_handle *dev_handle, uint8_
 
             handle_priv->interfaces.insert(std::make_pair(iface, std::move(itfDef)));
 
-            // Save this as the default device if no control transfers are being processed
+            if (!isDefaultDevice)
             {
+                // Save this as the default device if no control transfers are being processed
                 std::lock_guard<std::mutex> lock(priv->control_transfer_mutex);
                 if (!priv->active_control_transfer)
                 {
                     priv->default_device = winrtDev;
+                    priv->default_device_id = id;
                 }
             }
 
@@ -537,6 +552,7 @@ static int winrt_release_interface(struct libusb_device_handle *dev_handle, uint
                     if (claimedEntry.second.device)
                     {
                         priv->default_device = claimedEntry.second.device;
+                        priv->default_device_id = claimedEntry.second.device_id;
                         break;
                     }
                 }
@@ -569,6 +585,7 @@ static void winrt_destroy_device(struct libusb_device *dev)
     {
         priv->default_device.Close();
         priv->default_device = nullptr;
+        priv->default_device_id.clear();
     }
     // Manually call destructor
     priv->~winrt_device_priv();

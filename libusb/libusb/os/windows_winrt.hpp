@@ -52,6 +52,8 @@ struct winrt_device_priv
     std::wstring container_id;
     // Because of the way winrt is setup, a UsbDevice must be claimed to perform any operation
     winrt::Windows::Devices::Usb::UsbDevice default_device = nullptr;
+    // The ID of the default device
+    std::wstring default_device_id;
 
     // Currently processing control transfer
     usbi_transfer* active_control_transfer;
@@ -64,6 +66,7 @@ struct winrt_device_priv
 struct winrt_interface
 {
     winrt::Windows::Devices::Usb::UsbDevice device;
+    std::wstring device_id;
     std::unordered_map<uint8_t, winrt::Windows::Devices::Usb::UsbBulkInPipe> bulk_in_pipes;
     std::unordered_map<uint8_t, winrt::Windows::Devices::Usb::UsbBulkOutPipe> bulk_out_pipes;
     std::unordered_map<uint8_t, winrt::Windows::Devices::Usb::UsbInterruptInPipe> interrupt_in_pipes;
