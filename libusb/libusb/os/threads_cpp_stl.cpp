@@ -128,7 +128,7 @@ void usbi_cond_destroy(usbi_cond_t *cond)
 struct cpp_stl_usbi_tls
 {
     std::mutex mtx;
-    void* ptr;
+    void* ptr = NULL;
 };
 
 void usbi_tls_key_create(usbi_tls_key_t *key)
