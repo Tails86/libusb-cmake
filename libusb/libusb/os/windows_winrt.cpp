@@ -316,6 +316,7 @@ static int winrt_open(struct libusb_device_handle *dev_handle)
             dataReader.ReadBytes(activeConfigData);
             priv->active_config = activeConfigData[0];
 
+            bool descRetrievalFailed = false;
             priv->config_descriptors.resize(dev_handle->dev->device_descriptor.bNumConfigurations);
             for (uint8_t i = 0; i < dev_handle->dev->device_descriptor.bNumConfigurations; ++i)
             {
@@ -340,9 +341,8 @@ static int winrt_open(struct libusb_device_handle *dev_handle)
 
                 if (!ibuf)
                 {
-                    commFail = true;
-                    // Try next device
-                    continue;
+                    descRetrievalFailed = true;
+                    break;
                 }
 
                 dataReader = winrt::Windows::Storage::Streams::DataReader::FromBuffer(ibuf);
@@ -362,14 +362,20 @@ static int winrt_open(struct libusb_device_handle *dev_handle)
 
                 if (!ibuf)
                 {
-                    commFail = true;
-                    // Try next device
-                    continue;
+                    descRetrievalFailed = true;
+                    break;
                 }
 
                 dataReader = winrt::Windows::Storage::Streams::DataReader::FromBuffer(ibuf);
                 priv->config_descriptors[i].resize(ibuf.Length());
                 dataReader.ReadBytes(priv->config_descriptors[i]);
+            }
+
+            if (descRetrievalFailed)
+            {
+                commFail = true;
+                // Try next device
+                continue;
             }
 
             return LIBUSB_SUCCESS;
