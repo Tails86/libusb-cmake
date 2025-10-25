@@ -244,6 +244,11 @@ static int winrt_get_device_list(struct libusb_context *ctx, struct discovered_d
 	return LIBUSB_SUCCESS;
 }
 
+static inline uint16_t ReadLittleEndian16(const uint8_t p[2])
+{
+	return (uint16_t)((uint16_t)p[1] << 8 | (uint16_t)p[0]);
+}
+
 static int winrt_open(struct libusb_device_handle *dev_handle)
 {
     // Use placement new to properly construct the private structure
@@ -268,6 +273,7 @@ static int winrt_open(struct libusb_device_handle *dev_handle)
         return LIBUSB_ERROR_NOT_FOUND;
     }
 
+    bool commFail = false;
     for (const DeviceInformation& deviceInfo : deviceInfos)
     {
         UsbDevice winrtDev = winrt_async_get<UsbDevice>(
@@ -280,11 +286,68 @@ static int winrt_open(struct libusb_device_handle *dev_handle)
         if (winrtDev)
         {
             priv->default_device = winrtDev;
+
+            priv->config_descriptors.resize(dev_handle->dev->device_descriptor.bNumConfigurations);
+            for (uint8_t i = 0; i < dev_handle->dev->device_descriptor.bNumConfigurations; ++i)
+            {
+                // The data within winrtDev.Configuration().Descriptors() is often incorrect for some reason.
+                // The best bet is to simply send a control transfer.
+                auto setupPacket = UsbSetupPacket();
+                setupPacket.RequestType().Direction(UsbTransferDirection::In);
+                setupPacket.RequestType().ControlTransferType(UsbControlTransferType::Standard);
+                setupPacket.RequestType().Recipient(UsbControlRecipient::Device);
+                setupPacket.Request(0x06); // GET_DESCRIPTOR
+                setupPacket.Value((LIBUSB_DT_CONFIG << 8) | i); // configuration descriptor with index
+                setupPacket.Index(0);
+                setupPacket.Length(LIBUSB_DT_CONFIG_SIZE);
+
+                auto outputBuffer = Streams::Buffer(LIBUSB_DT_CONFIG_SIZE);
+                auto ibuf = winrt_async_get<Streams::IBuffer>(
+                    [&]()
+                    {
+                        return winrtDev.SendControlInTransferAsync(setupPacket, outputBuffer).get();
+                    }
+                );
+
+                if (!ibuf)
+                {
+                    commFail = true;
+                    // Try next device
+                    continue;
+                }
+
+                auto dataReader = winrt::Windows::Storage::Streams::DataReader::FromBuffer(ibuf);
+                priv->config_descriptors[i].resize(ibuf.Length());
+                dataReader.ReadBytes(priv->config_descriptors[i]);
+
+                // Get full length
+                uint16_t realLen = ReadLittleEndian16(&priv->config_descriptors[i][2]);
+                setupPacket.Length(realLen);
+                outputBuffer = Streams::Buffer(realLen);
+                ibuf = winrt_async_get<Streams::IBuffer>(
+                    [&]()
+                    {
+                        return winrtDev.SendControlInTransferAsync(setupPacket, outputBuffer).get();
+                    }
+                );
+
+                if (!ibuf)
+                {
+                    commFail = true;
+                    // Try next device
+                    continue;
+                }
+
+                dataReader = winrt::Windows::Storage::Streams::DataReader::FromBuffer(ibuf);
+                priv->config_descriptors[i].resize(ibuf.Length());
+                dataReader.ReadBytes(priv->config_descriptors[i]);
+            }
+
             return LIBUSB_SUCCESS;
         }
     }
 
-    return LIBUSB_ERROR_BUSY;
+    return commFail ? LIBUSB_ERROR_IO : LIBUSB_ERROR_BUSY;
 }
 
 static void winrt_close(struct libusb_device_handle *dev_handle)
@@ -295,9 +358,35 @@ static void winrt_close(struct libusb_device_handle *dev_handle)
     handle_priv->~winrt_device_handle_priv();
 }
 
+static int winrt_get_config_descriptor_by_value(
+    struct libusb_device *dev,
+	uint8_t bConfigurationValue,
+    void **buffer
+)
+{
+    winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(dev));
+
+    if (bConfigurationValue == 0 || (bConfigurationValue - 1) >= priv->config_descriptors.size())
+    {
+        return -1;
+    }
+
+    *buffer = &priv->config_descriptors[bConfigurationValue - 1][0];
+    return static_cast<int>(priv->config_descriptors[bConfigurationValue - 1].size());
+}
+
 static int winrt_get_active_config_descriptor(struct libusb_device *dev, void *buffer, size_t len)
 {
-    return LIBUSB_ERROR_IO;
+	winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(dev));
+	void *config_desc;
+
+	int r = winrt_get_config_descriptor_by_value(dev, priv->active_config, &config_desc);
+	if (r < 0)
+		return r;
+
+	len = MIN(len, (size_t)r);
+	memcpy(buffer, config_desc, len);
+	return (int)len;
 }
 
 static int winrt_get_config_descriptor(struct libusb_device *dev, uint8_t config_index, void *buffer, size_t len)
@@ -305,23 +394,18 @@ static int winrt_get_config_descriptor(struct libusb_device *dev, uint8_t config
     return LIBUSB_ERROR_IO;
 }
 
-static int winrt_get_config_descriptor_by_value(
-    struct libusb_device *dev,
-	uint8_t bConfigurationValue,
-    void **buffer
-)
-{
-	return LIBUSB_ERROR_IO;
-}
-
 static int winrt_get_configuration(struct libusb_device_handle *dev_handle, uint8_t *config)
 {
-    return LIBUSB_ERROR_IO;
+	struct winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(dev_handle->dev));
+
+	*config = priv->active_config;
+	return LIBUSB_SUCCESS;
 }
 
 static int winrt_set_configuration(struct libusb_device_handle *dev_handle, int config)
 {
-    return LIBUSB_ERROR_IO;
+    // I haven't been able to find a way to support this yet
+    return LIBUSB_ERROR_NOT_SUPPORTED;
 }
 
 static int winrt_claim_interface(struct libusb_device_handle *dev_handle, uint8_t iface)
@@ -404,7 +488,16 @@ static int winrt_claim_interface(struct libusb_device_handle *dev_handle, uint8_
             }
 
             handle_priv->interfaces.insert(std::make_pair(iface, std::move(itfDef)));
-            priv->default_device = winrtDev;
+
+            // Save this as the default device if no control transfers are being processed
+            {
+                std::lock_guard<std::mutex> lock(priv->control_transfer_mutex);
+                if (!priv->active_control_transfer)
+                {
+                    priv->default_device = winrtDev;
+                }
+            }
+
             return LIBUSB_SUCCESS;
         }
     }
@@ -433,14 +526,19 @@ static int winrt_release_interface(struct libusb_device_handle *dev_handle, uint
 
         if (updateDefaultDevice)
         {
-            // To avoid keeping an unused interface open just for basic operations, try to change the default device
-            // to another used interface.
-            for (const auto& claimedEntry : handle_priv->interfaces)
+            std::lock_guard<std::mutex> lock(priv->control_transfer_mutex);
+
+            if (!priv->active_control_transfer)
             {
-                if (claimedEntry.second.device)
+                // To avoid keeping an unused interface open just for basic operations, try to change the default device
+                // to another used interface.
+                for (const auto& claimedEntry : handle_priv->interfaces)
                 {
-                    priv->default_device = claimedEntry.second.device;
-                    break;
+                    if (claimedEntry.second.device)
+                    {
+                        priv->default_device = claimedEntry.second.device;
+                        break;
+                    }
                 }
             }
         }
@@ -479,6 +577,7 @@ static void winrt_destroy_device(struct libusb_device *dev)
 static int winrt_submit_control_transfer(struct usbi_transfer *itransfer)
 {
 	struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
+    winrt_transfer_priv *tpriv = static_cast<winrt_transfer_priv*>(usbi_get_transfer_priv(itransfer));
 	struct winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(transfer->dev_handle->dev));
     struct libusb_control_setup *setup = (struct libusb_control_setup *)transfer->buffer;
     winrt_transfer_priv *transfer_priv = static_cast<winrt_transfer_priv*>(usbi_get_transfer_priv(itransfer));
@@ -499,30 +598,40 @@ static int winrt_submit_control_transfer(struct usbi_transfer *itransfer)
         auto outputBuffer = Streams::Buffer(setup->wLength);
         auto asyncOp = priv->default_device.SendControlInTransferAsync(setupPacket, outputBuffer);
 
-        asyncOp.Completed([itransfer, transfer](auto const& sender, auto const& args) {
-            bool completed = false;
-            try {
-                auto buffer = sender.GetResults();
-                // // Debug: Print buffer contents as hex
-                // printf("Buffer length: %u, data: ", static_cast<unsigned int>(buffer.Length()));
-                // auto dataReader2 = Streams::DataReader::FromBuffer(buffer);
-                // std::vector<uint8_t> hexData(buffer.Length());
-                // dataReader2.ReadBytes(hexData);
-                // for (size_t i = 0; i < hexData.size(); i++) {
-                //     printf("%02x ", hexData[i]);
-                // }
-                // printf("\n");
-                if (buffer && buffer.Length() <= transfer->length - LIBUSB_CONTROL_SETUP_SIZE) {
-                    auto dataReader = Streams::DataReader::FromBuffer(buffer);
-                    dataReader.ReadBytes(winrt::array_view<uint8_t>(transfer->buffer + LIBUSB_CONTROL_SETUP_SIZE, buffer.Length()));
-                    itransfer->transferred = buffer.Length();
-                    completed = true;
-                }
-            }
-            catch (...) {}
+        // This is capturing by value to keep the reference back to async operation
+        tpriv->cancel_fn = [asyncOp](){asyncOp.Cancel();};
 
-            winrt_handle_transfer_completion(itransfer);
-            usbi_handle_transfer_completion(itransfer, completed ? LIBUSB_TRANSFER_COMPLETED : LIBUSB_TRANSFER_ERROR);
+        asyncOp.Completed([itransfer](auto const& sender, auto const& args) {
+            libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
+            libusb_transfer_status status = LIBUSB_TRANSFER_ERROR;
+            if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Completed)
+            {
+                try {
+                    auto buffer = sender.GetResults();
+                    // // Debug: Print buffer contents as hex
+                    // printf("Buffer length: %u, data: ", static_cast<unsigned int>(buffer.Length()));
+                    // auto dataReader2 = Streams::DataReader::FromBuffer(buffer);
+                    // std::vector<uint8_t> hexData(buffer.Length());
+                    // dataReader2.ReadBytes(hexData);
+                    // for (size_t i = 0; i < hexData.size(); i++) {
+                    //     printf("%02x ", hexData[i]);
+                    // }
+                    // printf("\n");
+                    if (buffer && buffer.Length() <= transfer->length - LIBUSB_CONTROL_SETUP_SIZE) {
+                        auto dataReader = Streams::DataReader::FromBuffer(buffer);
+                        dataReader.ReadBytes(winrt::array_view<uint8_t>(transfer->buffer + LIBUSB_CONTROL_SETUP_SIZE, buffer.Length()));
+                        itransfer->transferred = buffer.Length();
+                        status = LIBUSB_TRANSFER_COMPLETED;
+                    }
+                }
+                catch (...) {}
+            }
+            else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Canceled)
+            {
+                status = LIBUSB_TRANSFER_CANCELLED;
+            }
+
+            winrt_transfer_completed(itransfer, status);
         });
     }
     else
@@ -534,17 +643,29 @@ static int winrt_submit_control_transfer(struct usbi_transfer *itransfer)
 
         auto asyncOp = priv->default_device.SendControlOutTransferAsync(setupPacket, inputBuffer);
 
-        asyncOp.Completed([itransfer](auto const& sender, auto const& args) {
-            bool completed = false;
-            try {
-                auto bytesTransferred = sender.GetResults();
-                itransfer->transferred = bytesTransferred;
-                completed = true;
-            }
-            catch (...) {}
+        // This is capturing by value to keep the reference back to async operation
+        tpriv->cancel_fn = [asyncOp](){asyncOp.Cancel();};
 
-            winrt_handle_transfer_completion(itransfer);
-            usbi_handle_transfer_completion(itransfer, completed ? LIBUSB_TRANSFER_COMPLETED : LIBUSB_TRANSFER_ERROR);
+        asyncOp.Completed([itransfer](auto const& sender, auto const& args) {
+            libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
+            libusb_transfer_status status = LIBUSB_TRANSFER_ERROR;
+            if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Completed)
+            {
+                try {
+                    auto bytesTransferred = sender.GetResults();
+                    itransfer->transferred = bytesTransferred;
+                    status = LIBUSB_TRANSFER_COMPLETED;
+                }
+                catch (...) {}
+            }
+            else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Canceled)
+            {
+                status = LIBUSB_TRANSFER_CANCELLED;
+            }
+
+            transfer->status = status;
+
+            winrt_transfer_completed(itransfer, status);
         });
     }
 
@@ -555,6 +676,8 @@ static int winrt_submit_control_transfer(struct usbi_transfer *itransfer)
 static int winrt_submit_transfer(struct usbi_transfer *itransfer)
 {
 	struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
+    // Use placement new to properly construct the private structure
+    winrt_transfer_priv *tpriv = new (usbi_get_transfer_priv(itransfer)) winrt_transfer_priv();
     winrt_device_handle_priv *handle_priv = static_cast<winrt_device_handle_priv*>(usbi_get_device_handle_priv(transfer->dev_handle));
 	struct winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(transfer->dev_handle->dev));
 
@@ -569,15 +692,17 @@ static int winrt_submit_transfer(struct usbi_transfer *itransfer)
     {
         case LIBUSB_TRANSFER_TYPE_CONTROL:
         {
-            std::lock_guard<std::mutex> lock(priv->control_transfer_queue_mutex);
-            priv->control_transfer_queue.push_back(itransfer);
+            std::lock_guard<std::mutex> lock(priv->control_transfer_mutex);
 
-            if (priv->control_transfer_queue.size() > 1)
+            if (priv->active_control_transfer)
             {
-                // Still working on previous transfer(s) - will get to this transfer later
+                // Still working on a transfer - will get to this transfer later
+                priv->control_transfer_queue.push_back(itransfer);
                 return LIBUSB_SUCCESS;
             }
 
+            // Begin transfer now
+            priv->active_control_transfer = itransfer;
             return winrt_submit_control_transfer(itransfer);
         }
         break;
@@ -586,12 +711,14 @@ static int winrt_submit_transfer(struct usbi_transfer *itransfer)
         case LIBUSB_TRANSFER_TYPE_BULK_STREAM:
         {
             // TODO
+            return LIBUSB_ERROR_OTHER;
         }
         break;
 
         case LIBUSB_TRANSFER_TYPE_INTERRUPT:
         {
             // TODO
+            return LIBUSB_ERROR_OTHER;
         }
         break;
 
@@ -605,46 +732,107 @@ static int winrt_submit_transfer(struct usbi_transfer *itransfer)
             usbi_err(TRANSFER_CTX(transfer), "unknown endpoint type %d", transfer->type);
             return LIBUSB_ERROR_INVALID_PARAM;
     }
-
-    return LIBUSB_ERROR_IO;
 }
 
-static int winrt_cancel_transfer(struct usbi_transfer *itransfer)
-{
-    return LIBUSB_ERROR_IO;
-}
-
-int winrt_handle_events(struct libusb_context *ctx, void *event_data, unsigned int count, unsigned int num_ready)
-{
-    return LIBUSB_SUCCESS;
-}
-
-static int winrt_handle_transfer_completion(struct usbi_transfer *itransfer)
+static int winrt_pop_transfer(usbi_transfer *itransfer)
 {
 	struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
+    winrt_transfer_priv *tpriv = static_cast<winrt_transfer_priv*>(usbi_get_transfer_priv(itransfer));
 	struct winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(transfer->dev_handle->dev));
 
-    std::unique_lock<std::mutex> lock(priv->control_transfer_queue_mutex);
-
-    // The first item should always be the transfer, but may as well iterate the entire list here
-    for (auto iter = priv->control_transfer_queue.begin(); iter != priv->control_transfer_queue.end(); ++iter)
     {
-        if (*iter == itransfer)
+        std::unique_lock<std::mutex> lock(priv->control_transfer_mutex);
+
+        if (priv->active_control_transfer == itransfer)
         {
-            priv->control_transfer_queue.erase(iter);
-            itransfer = nullptr;
+            // This was a control transfer that just completed
+            tpriv->cancel_fn = nullptr;
+            priv->active_control_transfer = nullptr;
+
             if (priv->control_transfer_queue.empty())
             {
                 // No more transfers to process
                 return LIBUSB_SUCCESS;
             }
+
+            // Submit the next transfer and return
             itransfer = priv->control_transfer_queue.front();
-            lock.unlock();
+            priv->control_transfer_queue.pop_front();
+            priv->active_control_transfer = itransfer;
             return winrt_submit_control_transfer(itransfer);
         }
     }
 
     return LIBUSB_ERROR_NOT_FOUND;
+}
+
+static void winrt_transfer_completed(usbi_transfer *itransfer, libusb_transfer_status status)
+{
+    winrt_pop_transfer(itransfer);
+
+    // Explicitly call destructor for private data (if re-used, placement new will be called again later)
+    winrt_transfer_priv *tpriv = static_cast<winrt_transfer_priv*>(usbi_get_transfer_priv(itransfer));
+    tpriv->~winrt_transfer_priv();
+
+    if (status == LIBUSB_TRANSFER_CANCELLED)
+    {
+        usbi_handle_transfer_cancellation(itransfer);
+    }
+    else
+    {
+        usbi_handle_transfer_completion(itransfer, status);
+    }
+}
+
+static int winrt_handle_transfer_completion(struct usbi_transfer *itransfer)
+{
+    // TODO: there doesn't seem to be a need for this function since winrt_transfer_completed() is called in thread
+    return LIBUSB_SUCCESS;
+}
+
+static int winrt_cancel_transfer(struct usbi_transfer *itransfer)
+{
+	struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
+    winrt_transfer_priv *tpriv = static_cast<winrt_transfer_priv*>(usbi_get_transfer_priv(itransfer));
+	struct winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(transfer->dev_handle->dev));
+
+    {
+        std::unique_lock<std::mutex> lock(priv->control_transfer_mutex);
+
+        if (priv->active_control_transfer == itransfer)
+        {
+            if (tpriv->cancel_fn)
+            {
+                tpriv->cancel_fn();
+                // The callback function will complete the transfer once it's fully canceled
+                return LIBUSB_SUCCESS;
+            }
+            else
+            {
+                // This isn't expected
+                // TODO: describe this error
+                return LIBUSB_ERROR_OTHER;
+            }
+        }
+
+        for (auto iter = priv->control_transfer_queue.begin(); iter != priv->control_transfer_queue.end(); ++iter)
+        {
+            if ((*iter) == itransfer)
+            {
+                priv->control_transfer_queue.erase(iter);
+                lock.unlock();
+                usbi_handle_transfer_cancellation(itransfer);
+                return LIBUSB_SUCCESS;
+            }
+        }
+    }
+
+    return LIBUSB_ERROR_NOT_FOUND;
+}
+
+int winrt_handle_events(struct libusb_context *ctx, void *event_data, unsigned int count, unsigned int num_ready)
+{
+    return LIBUSB_SUCCESS;
 }
 
 const usbi_os_backend usbi_backend = {

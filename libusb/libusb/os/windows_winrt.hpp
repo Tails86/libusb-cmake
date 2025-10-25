@@ -26,6 +26,8 @@
 #include <unordered_map>
 #include <list>
 #include <mutex>
+#include <vector>
+#include <functional>
 #include <winrt/base.h>
 #include <winrt/Windows.Devices.Usb.h>
 
@@ -40,15 +42,23 @@ struct winrt_context_priv
 
 struct winrt_device_priv
 {
+    //! The active configuration
+    uint8_t active_config = 1;
+
+    //! Stores each configuration descriptor once opened
+    std::vector<std::vector<uint8_t>> config_descriptors;
+
     //! String representation of System.Devices.ContainerId for this device
     std::wstring container_id;
     // Because of the way winrt is setup, a UsbDevice must be claimed to perform any operation
     winrt::Windows::Devices::Usb::UsbDevice default_device = nullptr;
 
-    // Queue of control transfers in progress (top of queue is currently active one)
+    // Currently processing control transfer
+    usbi_transfer* active_control_transfer;
+    // Queue of control transfers in progress
     std::list<usbi_transfer*> control_transfer_queue;
-    // Mutex serializing the above queue
-    std::mutex control_transfer_queue_mutex;
+    // Mutex serializing access to the above control transfer data
+    std::mutex control_transfer_mutex;
 };
 
 struct winrt_interface
@@ -67,18 +77,8 @@ struct winrt_device_handle_priv
 
 struct winrt_transfer_priv
 {
-//   /* Isoc */
-//   IOUSBIsocFrame *isoc_framelist;
-//   int num_iso_packets;
-
-//   /* Control */
-//   IOUSBDevRequestTO req;
-
-//   /* Bulk */
-
-//   /* Completion status */
-//   IOReturn result;
-//   UInt32 size;
+    // The function to call in order to cancel the asynchronous communication operation
+    std::function<void()> cancel_fn;
 };
 
 #endif // LIBUSB_WINDOWS_WINRT_H
