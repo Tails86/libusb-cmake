@@ -37,7 +37,17 @@
 // private structures
 struct winrt_context_priv
 {
-    // Nothing needed here yet
+    std::list<usbi_transfer*> canceled_floating_transfers;
+};
+
+struct winrt_transfer_queue
+{
+    // Currently processing transfer
+    usbi_transfer* active_transfer;
+    // Queue of transfers in progress
+    std::list<usbi_transfer*> transfer_queue;
+    // Mutex serializing access to the above transfer data
+    std::mutex transfer_mutex;
 };
 
 struct winrt_device_priv
@@ -55,12 +65,8 @@ struct winrt_device_priv
     // The ID of the default device
     std::wstring default_device_id;
 
-    // Currently processing control transfer
-    usbi_transfer* active_control_transfer;
-    // Queue of control transfers in progress
-    std::list<usbi_transfer*> control_transfer_queue;
-    // Mutex serializing access to the above control transfer data
-    std::mutex control_transfer_mutex;
+    // Keeps track of all current control transfers
+    winrt_transfer_queue control_transfers;
 };
 
 struct winrt_interface
@@ -76,6 +82,7 @@ struct winrt_interface
 struct winrt_device_handle_priv
 {
     std::unordered_map<uint8_t, winrt_interface> interfaces;
+    std::unordered_map<uint8_t, winrt_transfer_queue> transfers;
 };
 
 struct winrt_transfer_priv

@@ -102,6 +102,7 @@ void usbi_cond_wait(usbi_cond_t *cond, usbi_mutex_t *mutex)
 {
 	std::unique_lock<std::mutex> lock((*mutex)->mtx, std::adopt_lock);
     (*cond)->cv.wait(lock); // TODO: from STL documentation, this may spurriously wake. Is this ok?
+    lock.release();
 }
 int usbi_cond_timedwait(usbi_cond_t *cond, usbi_mutex_t *mutex, const struct timeval *tv)
 {
@@ -110,6 +111,7 @@ int usbi_cond_timedwait(usbi_cond_t *cond, usbi_mutex_t *mutex, const struct tim
         lock,
         std::chrono::seconds(tv->tv_sec) + std::chrono::microseconds(tv->tv_usec)
     );
+    lock.release();
 
     return ((status == std::cv_status::timeout) ? LIBUSB_ERROR_TIMEOUT : 0);
 }
