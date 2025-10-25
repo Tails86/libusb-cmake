@@ -642,16 +642,19 @@ static int winrt_release_interface(struct libusb_device_handle *dev_handle, uint
 
 static int winrt_set_interface_altsetting(struct libusb_device_handle *dev_handle, uint8_t iface, uint8_t altsetting)
 {
+    // TODO: implement
     return LIBUSB_ERROR_IO;
 }
 
 static int winrt_clear_halt(struct libusb_device_handle *dev_handle, unsigned char endpoint)
 {
+    // TODO: implement
     return LIBUSB_ERROR_IO;
 }
 
 static int winrt_reset_device(struct libusb_device_handle *dev_handle)
 {
+    // TODO: implement
     return LIBUSB_ERROR_IO;
 }
 
