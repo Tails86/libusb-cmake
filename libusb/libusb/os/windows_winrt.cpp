@@ -420,8 +420,19 @@ static int winrt_get_active_config_descriptor(struct libusb_device *dev, void *b
 
 static int winrt_get_config_descriptor(struct libusb_device *dev, uint8_t config_index, void *buffer, size_t len)
 {
-    // TODO
-    return LIBUSB_ERROR_IO;
+	winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(dev));
+
+    if (config_index >= priv->config_descriptors.size())
+    {
+        return -1;
+    }
+
+    const uint8_t *config_header = &priv->config_descriptors[config_index][0];
+    const std::size_t totalLength = priv->config_descriptors[config_index].size();
+
+	len = MIN(len, totalLength);
+	memcpy(buffer, config_header, len);
+	return (int)len;
 }
 
 static int winrt_get_configuration(struct libusb_device_handle *dev_handle, uint8_t *config)
