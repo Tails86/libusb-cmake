@@ -87,6 +87,7 @@ struct winrt_device_handle_priv
 
 struct winrt_transfer_priv
 {
+    libusb_transfer_status status = LIBUSB_TRANSFER_ERROR;
     // The function to call in order to cancel the asynchronous communication operation
     std::function<void()> cancel_fn;
 };

@@ -983,15 +983,15 @@ static int winrt_pop_transfer_from_queue(usbi_transfer *itransfer, winrt_transfe
             case LIBUSB_TRANSFER_TYPE_CONTROL:
                 return winrt_submit_control_transfer(itransfer);
 
-            case LIBUSB_TRANSFER_TYPE_BULK:
+            case LIBUSB_TRANSFER_TYPE_BULK: // Fall through
+            case LIBUSB_TRANSFER_TYPE_BULK_STREAM:
                 return winrt_submit_bulk_transfer(itransfer);
 
             case LIBUSB_TRANSFER_TYPE_INTERRUPT:
                 // TODO
                 return LIBUSB_ERROR_OTHER;
 
-            case LIBUSB_TRANSFER_TYPE_ISOCHRONOUS: // Fall through
-            case LIBUSB_TRANSFER_TYPE_BULK_STREAM:
+            case LIBUSB_TRANSFER_TYPE_ISOCHRONOUS:
                 return LIBUSB_ERROR_NOT_SUPPORTED;
 
             default:
@@ -1025,10 +1025,23 @@ static int winrt_pop_transfer(usbi_transfer *itransfer)
 
 static void winrt_transfer_completed(usbi_transfer *itransfer, libusb_transfer_status status)
 {
+    // Pop transfer and immediately start the next if it's available
     winrt_pop_transfer(itransfer);
 
-    // Explicitly call destructor for private data (if re-used, placement new will be called again later)
     winrt_transfer_priv *tpriv = static_cast<winrt_transfer_priv*>(usbi_get_transfer_priv(itransfer));
+    tpriv->status = status;
+
+    usbi_signal_transfer_completion(itransfer);
+}
+
+static int winrt_handle_transfer_completion(struct usbi_transfer *itransfer)
+{
+    winrt_transfer_priv *tpriv = static_cast<winrt_transfer_priv*>(usbi_get_transfer_priv(itransfer));
+
+    // Save the status value before destruction
+    libusb_transfer_status status = tpriv->status;
+
+    // Explicitly call destructor for private data (if re-used, placement new will be called again later)
     tpriv->~winrt_transfer_priv();
 
     if (status == LIBUSB_TRANSFER_CANCELLED)
@@ -1039,11 +1052,7 @@ static void winrt_transfer_completed(usbi_transfer *itransfer, libusb_transfer_s
     {
         usbi_handle_transfer_completion(itransfer, status);
     }
-}
 
-static int winrt_handle_transfer_completion(struct usbi_transfer *itransfer)
-{
-    // TODO: there doesn't seem to be a need for this function since winrt_transfer_completed() is called in thread
     return LIBUSB_SUCCESS;
 }
 
