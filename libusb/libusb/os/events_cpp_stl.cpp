@@ -138,11 +138,13 @@ int usbi_alloc_event_data(struct libusb_context *ctx)
 		return LIBUSB_ERROR_OTHER;
 	}
 
+    // Note: free(ctx->event_data) is called in io.c
 	handles = static_cast<void**>(calloc(ctx->event_data_cnt, sizeof(void*)));
 	if (!handles)
 		return LIBUSB_ERROR_NO_MEM;
 
 	for_each_event_source(ctx, ievent_source) {
+        // ievent_source->data.os_handle holds the allocated pointers to event and timer
 		handles[i] = ievent_source->data.os_handle;
 		i++;
 	}

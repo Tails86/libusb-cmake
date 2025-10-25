@@ -82,7 +82,7 @@ void *usbi_tls_key_get(usbi_tls_key_t key);
 void usbi_tls_key_set(usbi_tls_key_t key, void *ptr);
 void usbi_tls_key_delete(usbi_tls_key_t key);
 
-size_t usbi_get_tid();
+unsigned long usbi_get_tid();
 
 #ifdef __cplusplus
 }

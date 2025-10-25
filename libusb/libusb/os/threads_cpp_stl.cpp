@@ -18,12 +18,15 @@
  */
 
 #include "libusbi.h"
+#include "threads_cpp_stl.h"
 
 #include <mutex>
 #include <condition_variable>
 #include <thread>
 #include <memory>
 #include <list>
+#include <thread>
+#include <unordered_map>
 
 static std::mutex static_mutex;
 
@@ -92,6 +95,8 @@ void usbi_mutex_destroy(usbi_mutex_t *mutex)
 struct cpp_stl_usbi_cond
 {
     std::condition_variable cv;
+    // This is needed because C++ condition_variable is documented to spurriously wake
+    bool signaled = false;
 };
 
 void usbi_cond_init(usbi_cond_t *cond)
@@ -101,7 +106,8 @@ void usbi_cond_init(usbi_cond_t *cond)
 void usbi_cond_wait(usbi_cond_t *cond, usbi_mutex_t *mutex)
 {
 	std::unique_lock<std::mutex> lock((*mutex)->mtx, std::adopt_lock);
-    (*cond)->cv.wait(lock); // TODO: from STL documentation, this may spurriously wake. Is this ok?
+    (*cond)->cv.wait(lock, [&cond](){return (*cond)->signaled;});
+    (*cond)->signaled = false;
     lock.release();
 }
 int usbi_cond_timedwait(usbi_cond_t *cond, usbi_mutex_t *mutex, const struct timeval *tv)
@@ -117,6 +123,7 @@ int usbi_cond_timedwait(usbi_cond_t *cond, usbi_mutex_t *mutex, const struct tim
 }
 void usbi_cond_broadcast(usbi_cond_t *cond)
 {
+    (*cond)->signaled = true;
 	(*cond)->cv.notify_all();
 }
 void usbi_cond_destroy(usbi_cond_t *cond)
@@ -128,7 +135,8 @@ void usbi_cond_destroy(usbi_cond_t *cond)
 struct cpp_stl_usbi_tls
 {
     std::mutex mtx;
-    void* ptr = NULL;
+    // Thread Local Storage means 0 to 1 pointer stored per thread
+    std::unordered_map<std::thread::id, void*> ptrs;
 };
 
 void usbi_tls_key_create(usbi_tls_key_t *key)
@@ -138,12 +146,24 @@ void usbi_tls_key_create(usbi_tls_key_t *key)
 void *usbi_tls_key_get(usbi_tls_key_t key)
 {
 	std::lock_guard<std::mutex> lock(key->mtx);
-    return key->ptr;
+    auto iter = key->ptrs.find(std::this_thread::get_id());
+    if (iter == key->ptrs.end())
+    {
+        return NULL;
+    }
+    return iter->second;
 }
 void usbi_tls_key_set(usbi_tls_key_t key, void *ptr)
 {
 	std::lock_guard<std::mutex> lock(key->mtx);
-    key->ptr = ptr;
+    if (ptr)
+    {
+        key->ptrs.insert_or_assign(std::this_thread::get_id(), ptr);
+    }
+    else
+    {
+        key->ptrs.erase(std::this_thread::get_id());
+    }
 }
 void usbi_tls_key_delete(usbi_tls_key_t key)
 {
@@ -151,10 +171,11 @@ void usbi_tls_key_delete(usbi_tls_key_t key)
     key = nullptr;
 }
 
-size_t usbi_get_tid()
+unsigned long usbi_get_tid()
 {
     const std::thread::id id = std::this_thread::get_id();
-    return std::hash<std::thread::id>{}(id);
+    // This is not guaranteed to be 1:1, but this is used only for logging purposes anyway
+    return static_cast<unsigned long>(std::hash<std::thread::id>{}(id));
 }
 
 
