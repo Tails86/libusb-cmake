@@ -41,9 +41,7 @@ using namespace winrt::Windows::Foundation::Collections;
 using namespace winrt::Windows::Devices::Usb;
 using namespace winrt::Windows::Storage;
 
-static constexpr const uint8_t SIMULATED_IMANUFACTURER = 1;
-static constexpr const uint8_t SIMULATED_IPRODUCT = 2;
-static constexpr const uint8_t SIMULATED_ISERIAL = 3;
+static constexpr const uint64_t WINRT_STANDARD_TIMEOUT_MS = 5000;
 
 static unsigned long container_id_to_session_id(libusb_context *ctx, const guid& container_id)
 {
@@ -96,6 +94,45 @@ static T winrt_async_get(libusb_context *ctx, const std::function<T()>& getFn)
     }
 }
 
+static int winrt_send_control_transfer_in(
+    libusb_context *ctx,
+    winrt::Windows::Devices::Usb::UsbDevice& dev,
+    const UsbSetupPacket& setupPacket,
+    winrt::array_view<uint8_t> dat
+)
+{
+    winrt::Windows::Foundation::AsyncStatus status;
+    auto outputBuffer = Streams::Buffer(setupPacket.Length());
+    auto buf = winrt_async_get<Streams::IBuffer>(
+        ctx,
+        [&]()
+        {
+            auto asyncOp = dev.SendControlInTransferAsync(setupPacket, outputBuffer);
+            status = asyncOp.wait_for(std::chrono::milliseconds(WINRT_STANDARD_TIMEOUT_MS));
+            if (status != winrt::Windows::Foundation::AsyncStatus::Completed)
+            {
+                asyncOp.Cancel();
+                status = winrt::Windows::Foundation::AsyncStatus::Canceled;
+            }
+            return asyncOp.get();
+        }
+    );
+
+    if (status == winrt::Windows::Foundation::AsyncStatus::Canceled)
+    {
+        return LIBUSB_ERROR_TIMEOUT;
+    }
+    else if (status != winrt::Windows::Foundation::AsyncStatus::Completed || !buf)
+    {
+        return LIBUSB_ERROR_IO;
+    }
+
+    auto dataReader = winrt::Windows::Storage::Streams::DataReader::FromBuffer(buf);
+    dataReader.ReadBytes(dat);
+
+    return LIBUSB_SUCCESS;
+}
+
 static int winrt_init(libusb_context *ctx)
 {
     // Use placement new to properly construct the private structure
@@ -116,18 +153,38 @@ static int winrt_get_device_list(libusb_context *ctx, struct discovered_devs **_
     auto additionalProperties = winrt::single_threaded_vector<winrt::hstring>();
     additionalProperties.Append(L"System.Devices.ContainerId");
     additionalProperties.Append(L"System.Devices.DeviceInstanceId");
+    winrt::Windows::Foundation::AsyncStatus status = winrt::Windows::Foundation::AsyncStatus::Started;
     DeviceInformationCollection deviceInfos = winrt_async_get<DeviceInformationCollection>(
         ctx,
         [&]()
         {
-            return DeviceInformation::FindAllAsync(
+            auto asyncOp = DeviceInformation::FindAllAsync(
                 L"System.Devices.InterfaceEnabled:=System.StructuredQueryType.Boolean#True"
                 L" AND (System.Devices.DeviceInstanceId:~<\"USB\\\" OR System.Devices.DeviceInstanceId:~<\"HID\\\")",
                 additionalProperties,
                 DeviceInformationKind::DeviceInterface
-            ).get();
+            );
+
+            status = asyncOp.wait_for(std::chrono::milliseconds(WINRT_STANDARD_TIMEOUT_MS));
+
+            if (status != winrt::Windows::Foundation::AsyncStatus::Completed)
+            {
+                asyncOp.Cancel();
+                status = winrt::Windows::Foundation::AsyncStatus::Canceled;
+            }
+
+            return asyncOp.get();
         }
     );
+
+    if (status == winrt::Windows::Foundation::AsyncStatus::Canceled)
+    {
+        return LIBUSB_ERROR_TIMEOUT;
+    }
+    else if (status != winrt::Windows::Foundation::AsyncStatus::Completed)
+    {
+        return LIBUSB_ERROR_IO;
+    }
 
     std::unordered_set<guid> foundContainerIds;
 
@@ -162,7 +219,13 @@ static int winrt_get_device_list(libusb_context *ctx, struct discovered_devs **_
                     ctx,
                     [&deviceInfo]()
                     {
-                        return UsbDevice::FromIdAsync(deviceInfo.Id()).get();
+                        auto asyncOp = UsbDevice::FromIdAsync(deviceInfo.Id());
+                        auto status = asyncOp.wait_for(std::chrono::milliseconds(WINRT_STANDARD_TIMEOUT_MS));
+                        if (status != winrt::Windows::Foundation::AsyncStatus::Completed)
+                        {
+                            asyncOp.Cancel();
+                        }
+                        return asyncOp.get();
                     }
                 );
 
@@ -184,29 +247,17 @@ static int winrt_get_device_list(libusb_context *ctx, struct discovered_devs **_
                 setupPacket.Index(0);
                 setupPacket.Length(LIBUSB_DT_DEVICE_SIZE);
 
-                auto outputBuffer = Streams::Buffer(LIBUSB_DT_DEVICE_SIZE);
-                auto buffer = winrt_async_get<Streams::IBuffer>(
-                    ctx,
-                    [&]()
-                    {
-                        return winrtDev.SendControlInTransferAsync(setupPacket, outputBuffer).get();
-                    }
-                );
+                std::vector<uint8_t> data(LIBUSB_DT_DEVICE_SIZE);
+                int r = winrt_send_control_transfer_in(ctx, winrtDev, setupPacket, data);
 
-                if (!buffer) {
+                if (r != LIBUSB_SUCCESS)
+                {
                     libusb_unref_device(dev);
                     continue;
                 }
 
-                auto dataReader = winrt::Windows::Storage::Streams::DataReader::FromBuffer(buffer);
-                std::vector<uint8_t> data(buffer.Length());
-                dataReader.ReadBytes(data);
-
                 // Copy the raw descriptor data from buffer to device descriptor
-                if (data.size() >= LIBUSB_DT_DEVICE_SIZE)
-                {
-                    memcpy(&dev->device_descriptor, data.data(), LIBUSB_DT_DEVICE_SIZE);
-                }
+                memcpy(&dev->device_descriptor, data.data(), LIBUSB_DT_DEVICE_SIZE);
                 usbi_localize_device_descriptor(&dev->device_descriptor);
 
                 int err = usbi_sanitize_device(dev);
@@ -244,19 +295,38 @@ static int winrt_open(libusb_device_handle *dev_handle)
 
     // One DeviceInterface must be open to perform any device operation
     auto additionalProperties = winrt::single_threaded_vector<winrt::hstring>();
+    winrt::Windows::Foundation::AsyncStatus status = winrt::Windows::Foundation::AsyncStatus::Started;
     DeviceInformationCollection deviceInfos = winrt_async_get<DeviceInformationCollection>(
         dev_handle->dev->ctx,
         [&]()
         {
-            return DeviceInformation::FindAllAsync(
+            auto asyncOp = DeviceInformation::FindAllAsync(
                 L"System.Devices.ContainerId:=\"" + priv->container_id + L"\"",
                 additionalProperties,
                 DeviceInformationKind::DeviceInterface
-            ).get();
+            );
+
+            status = asyncOp.wait_for(std::chrono::milliseconds(WINRT_STANDARD_TIMEOUT_MS));
+
+            if (status != winrt::Windows::Foundation::AsyncStatus::Completed)
+            {
+                asyncOp.Cancel();
+                status = winrt::Windows::Foundation::AsyncStatus::Canceled;
+            }
+
+            return asyncOp.get();
         }
     );
 
-    if (deviceInfos.Size() == 0)
+    if (status == winrt::Windows::Foundation::AsyncStatus::Canceled)
+    {
+        return LIBUSB_ERROR_TIMEOUT;
+    }
+    else if (status != winrt::Windows::Foundation::AsyncStatus::Completed)
+    {
+        return LIBUSB_ERROR_IO;
+    }
+    else if (deviceInfos.Size() == 0)
     {
         return LIBUSB_ERROR_NOT_FOUND;
     }
@@ -268,7 +338,13 @@ static int winrt_open(libusb_device_handle *dev_handle)
             dev_handle->dev->ctx,
             [&deviceInfo]()
             {
-                return UsbDevice::FromIdAsync(deviceInfo.Id()).get();
+                auto asyncOp = UsbDevice::FromIdAsync(deviceInfo.Id());
+                auto status = asyncOp.wait_for(std::chrono::milliseconds(WINRT_STANDARD_TIMEOUT_MS));
+                if (status != winrt::Windows::Foundation::AsyncStatus::Completed)
+                {
+                    asyncOp.Cancel();
+                }
+                return asyncOp.get();
             }
         );
 
@@ -287,25 +363,16 @@ static int winrt_open(libusb_device_handle *dev_handle)
             setupPacket.Index(0);
             setupPacket.Length(1);
 
-            auto outputBuffer = Streams::Buffer(LIBUSB_DT_CONFIG_SIZE);
-            auto ibuf = winrt_async_get<Streams::IBuffer>(
-                dev_handle->dev->ctx,
-                [&]()
-                {
-                    return winrtDev.SendControlInTransferAsync(setupPacket, outputBuffer).get();
-                }
-            );
+            std::vector<uint8_t> activeConfigData(1);
+            int r = winrt_send_control_transfer_in(dev_handle->dev->ctx, winrtDev, setupPacket, activeConfigData);
 
-            if (!ibuf)
+            if (r != LIBUSB_SUCCESS)
             {
                 commFail = true;
                 // Try next device
                 continue;
             }
 
-            auto dataReader = winrt::Windows::Storage::Streams::DataReader::FromBuffer(ibuf);
-            std::vector<uint8_t> activeConfigData(1);
-            dataReader.ReadBytes(activeConfigData);
             priv->active_config = activeConfigData[0];
 
             bool descRetrievalFailed = false;
@@ -323,46 +390,36 @@ static int winrt_open(libusb_device_handle *dev_handle)
                 setupPacket.Index(0);
                 setupPacket.Length(LIBUSB_DT_CONFIG_SIZE);
 
-                outputBuffer = Streams::Buffer(LIBUSB_DT_CONFIG_SIZE);
-                ibuf = winrt_async_get<Streams::IBuffer>(
+                priv->config_descriptors[i].resize(LIBUSB_DT_CONFIG_SIZE);
+                r = winrt_send_control_transfer_in(
                     dev_handle->dev->ctx,
-                    [&]()
-                    {
-                        return winrtDev.SendControlInTransferAsync(setupPacket, outputBuffer).get();
-                    }
+                    winrtDev,
+                    setupPacket,
+                    priv->config_descriptors[i]
                 );
 
-                if (!ibuf)
+                if (r != LIBUSB_SUCCESS)
                 {
                     descRetrievalFailed = true;
                     break;
                 }
-
-                dataReader = winrt::Windows::Storage::Streams::DataReader::FromBuffer(ibuf);
-                priv->config_descriptors[i].resize(ibuf.Length());
-                dataReader.ReadBytes(priv->config_descriptors[i]);
 
                 // Get full length
                 uint16_t realLen = ReadLittleEndian16(&priv->config_descriptors[i][2]);
                 setupPacket.Length(realLen);
-                outputBuffer = Streams::Buffer(realLen);
-                ibuf = winrt_async_get<Streams::IBuffer>(
+                priv->config_descriptors[i].resize(realLen);
+                r = winrt_send_control_transfer_in(
                     dev_handle->dev->ctx,
-                    [&]()
-                    {
-                        return winrtDev.SendControlInTransferAsync(setupPacket, outputBuffer).get();
-                    }
+                    winrtDev,
+                    setupPacket,
+                    priv->config_descriptors[i]
                 );
 
-                if (!ibuf)
+                if (r != LIBUSB_SUCCESS)
                 {
                     descRetrievalFailed = true;
                     break;
                 }
-
-                dataReader = winrt::Windows::Storage::Streams::DataReader::FromBuffer(ibuf);
-                priv->config_descriptors[i].resize(ibuf.Length());
-                dataReader.ReadBytes(priv->config_descriptors[i]);
             }
 
             if (descRetrievalFailed)
@@ -462,16 +519,10 @@ static int winrt_set_configuration(libusb_device_handle *dev_handle, int config)
     setupPacket.Index(0);
     setupPacket.Length(0);
 
-    auto outputBuffer = Streams::Buffer(LIBUSB_DT_CONFIG_SIZE);
-    auto ibuf = winrt_async_get<Streams::IBuffer>(
-        dev_handle->dev->ctx,
-        [&]()
-        {
-            return priv->default_device.SendControlInTransferAsync(setupPacket, outputBuffer).get();
-        }
-    );
+    std::vector<uint8_t> dummy;
+    int r = winrt_send_control_transfer_in(dev_handle->dev->ctx, priv->default_device, setupPacket, dummy);
 
-    if (!ibuf)
+    if (r != LIBUSB_SUCCESS)
     {
         return LIBUSB_ERROR_IO;
     }
