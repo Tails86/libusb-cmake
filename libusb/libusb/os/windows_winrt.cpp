@@ -647,8 +647,6 @@ static int winrt_get_configuration(libusb_device_handle *dev_handle, uint8_t *co
 
 static int winrt_set_configuration(libusb_device_handle *dev_handle, int config)
 {
-    // TODO: test this
-
 	winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(dev_handle->dev));
 
     if (!priv->default_device)
@@ -851,8 +849,6 @@ static int winrt_release_interface(libusb_device_handle *dev_handle, uint8_t ifa
 
 static int winrt_set_interface_altsetting(libusb_device_handle *dev_handle, uint8_t iface, uint8_t altsetting)
 {
-    // TODO: test this
-
     winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(dev_handle->dev));
 
     try
@@ -1017,8 +1013,6 @@ static int winrt_clear_halt(libusb_device_handle *dev_handle, unsigned char endp
 
 static int winrt_reset_device(libusb_device_handle *dev_handle)
 {
-    // TODO: test this
-
     winrt_device_handle_priv *handle_priv = static_cast<winrt_device_handle_priv*>(usbi_get_device_handle_priv(dev_handle));
 
     for (std::pair<const uint8_t, winrt_interface>& itf : handle_priv->interfaces)
