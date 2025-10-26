@@ -918,8 +918,6 @@ static int winrt_set_interface_altsetting(libusb_device_handle *dev_handle, uint
 
 static int winrt_clear_halt(libusb_device_handle *dev_handle, unsigned char endpoint)
 {
-    // TODO: test this
-
     winrt_device_handle_priv *handle_priv = static_cast<winrt_device_handle_priv*>(usbi_get_device_handle_priv(dev_handle));
 
     winrt::Windows::Foundation::AsyncStatus status = winrt::Windows::Foundation::AsyncStatus::Started;
@@ -1120,6 +1118,10 @@ static int winrt_submit_control_transfer(usbi_transfer *itransfer)
                 }
                 catch (...) {}
             }
+            else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Error)
+            {
+                status = LIBUSB_TRANSFER_STALL;
+            }
             else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Canceled)
             {
                 status = LIBUSB_TRANSFER_CANCELLED;
@@ -1151,6 +1153,10 @@ static int winrt_submit_control_transfer(usbi_transfer *itransfer)
                     status = LIBUSB_TRANSFER_COMPLETED;
                 }
                 catch (...) {}
+            }
+            else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Error)
+            {
+                status = LIBUSB_TRANSFER_STALL;
             }
             else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Canceled)
             {
@@ -1219,6 +1225,10 @@ static int winrt_submit_bulk_transfer(usbi_transfer *itransfer)
                             }
                             catch (...) {}
                         }
+                        else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Error)
+                        {
+                            status = LIBUSB_TRANSFER_STALL;
+                        }
                         else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Canceled)
                         {
                             status = LIBUSB_TRANSFER_CANCELLED;
@@ -1261,6 +1271,10 @@ static int winrt_submit_bulk_transfer(usbi_transfer *itransfer)
                                 status = LIBUSB_TRANSFER_COMPLETED;
                             }
                             catch (...) {}
+                        }
+                        else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Error)
+                        {
+                            status = LIBUSB_TRANSFER_STALL;
                         }
                         else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Canceled)
                         {
@@ -1362,6 +1376,10 @@ static int winrt_submit_interrupt_transfer(usbi_transfer *itransfer)
                                 status = LIBUSB_TRANSFER_COMPLETED;
                             }
                             catch (...) {}
+                        }
+                        else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Error)
+                        {
+                            status = LIBUSB_TRANSFER_STALL;
                         }
                         else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Canceled)
                         {
