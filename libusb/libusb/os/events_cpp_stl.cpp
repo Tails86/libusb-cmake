@@ -18,7 +18,6 @@
  */
 
 #include "libusbi.h"
-#include "events_cpp_stl.h" // TODO: remove
 
 #include <cstdlib>
 #include <chrono>

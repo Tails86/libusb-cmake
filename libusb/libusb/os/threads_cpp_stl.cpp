@@ -18,7 +18,6 @@
  */
 
 #include "libusbi.h"
-#include "threads_cpp_stl.h" // TODO: remove
 
 #include <mutex>
 #include <condition_variable>

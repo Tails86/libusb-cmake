@@ -18,7 +18,7 @@
  */
 
 #include "libusbi.h"
-#include "windows_winrt.hpp" // TODO: remove
+#include "windows_winrt.hpp"
 
 #include <unordered_map>
 #include <string>
@@ -260,10 +260,12 @@ static int winrt_send_control_transfer_in(
 
     if (status == winrt::Windows::Foundation::AsyncStatus::Canceled)
     {
+        usbi_warn(ctx, "winrt_send_control_transfer_in timeout");
         return LIBUSB_ERROR_TIMEOUT;
     }
     else if (status != winrt::Windows::Foundation::AsyncStatus::Completed || !buf)
     {
+        usbi_warn(ctx, "winrt_send_control_transfer_in failed");
         return LIBUSB_ERROR_IO;
     }
 
@@ -310,10 +312,12 @@ static int winrt_get_device_list(libusb_context *ctx, struct discovered_devs **_
 
     if (status == winrt::Windows::Foundation::AsyncStatus::Canceled)
     {
+        usbi_warn(ctx, "Timeout occurred querying for USB devices");
         return LIBUSB_ERROR_TIMEOUT;
     }
     else if (status != winrt::Windows::Foundation::AsyncStatus::Completed)
     {
+        usbi_warn(ctx, "Error occurred while querying for USB devices");
         return LIBUSB_ERROR_IO;
     }
 
@@ -333,6 +337,7 @@ static int winrt_get_device_list(libusb_context *ctx, struct discovered_devs **_
                 dev = usbi_alloc_device(ctx, session_id);
                 if (dev == NULL)
                 {
+                    usbi_err(ctx, "Failed to allocate memory for device");
                     return LIBUSB_ERROR_NO_MEM;
                 }
 
@@ -395,6 +400,8 @@ static int winrt_get_device_list(libusb_context *ctx, struct discovered_devs **_
 
             if (discovered_devs_append(*_discdevs, dev) == NULL)
             {
+                usbi_err(ctx, "Failed to allocate memory for device listing");
+                libusb_unref_device(dev);
                 return LIBUSB_ERROR_NO_MEM;
             }
 
@@ -418,6 +425,8 @@ static int winrt_open(libusb_device_handle *dev_handle)
     winrt_device_handle_priv *handle_priv = new (usbi_get_device_handle_priv(dev_handle)) winrt_device_handle_priv();
     winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(dev_handle->dev));
 
+    usbi_dbg(dev_handle->dev->ctx, "Finding devices with container ID %s", priv->container_id.c_str());
+
     // One DeviceInterface must be open to perform any device operation
     auto additionalProperties = winrt::single_threaded_vector<winrt::hstring>();
     winrt::Windows::Foundation::AsyncStatus status = winrt::Windows::Foundation::AsyncStatus::Started;
@@ -436,10 +445,12 @@ static int winrt_open(libusb_device_handle *dev_handle)
 
     if (status == winrt::Windows::Foundation::AsyncStatus::Canceled)
     {
+        usbi_warn(dev_handle->dev->ctx, "Timeout occurred while querying for USB device");
         return LIBUSB_ERROR_TIMEOUT;
     }
     else if (status != winrt::Windows::Foundation::AsyncStatus::Completed)
     {
+        usbi_warn(dev_handle->dev->ctx, "Error occurred while querying for USB device");
         return LIBUSB_ERROR_IO;
     }
     else if (deviceInfos.Size() == 0)
@@ -478,7 +489,15 @@ static int winrt_open(libusb_device_handle *dev_handle)
 
             if (r != LIBUSB_SUCCESS)
             {
+                usbi_warn(
+                    dev_handle->dev->ctx,
+                    "Failed to retrieve active configuration value (%s) using device %s",
+                    libusb_error_name(r),
+                    deviceInfo.Id().c_str()
+                );
+
                 commFail = true;
+
                 // Try next device
                 continue;
             }
@@ -510,7 +529,15 @@ static int winrt_open(libusb_device_handle *dev_handle)
 
                 if (r != LIBUSB_SUCCESS)
                 {
+                    usbi_warn(
+                        dev_handle->dev->ctx,
+                        "Failed to retrieve configuration descriptor header (%s) using device %s",
+                        libusb_error_name(r),
+                        deviceInfo.Id().c_str()
+                    );
+
                     descRetrievalFailed = true;
+
                     break;
                 }
 
@@ -527,7 +554,15 @@ static int winrt_open(libusb_device_handle *dev_handle)
 
                 if (r != LIBUSB_SUCCESS)
                 {
+                    usbi_warn(
+                        dev_handle->dev->ctx,
+                        "Failed to retrieve full configuration descriptor (%s) using device %s",
+                        libusb_error_name(r),
+                        deviceInfo.Id().c_str()
+                    );
+
                     descRetrievalFailed = true;
+
                     break;
                 }
             }
@@ -612,6 +647,8 @@ static int winrt_get_configuration(libusb_device_handle *dev_handle, uint8_t *co
 
 static int winrt_set_configuration(libusb_device_handle *dev_handle, int config)
 {
+    // TODO: test this
+
 	winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(dev_handle->dev));
 
     if (!priv->default_device)
@@ -634,6 +671,7 @@ static int winrt_set_configuration(libusb_device_handle *dev_handle, int config)
 
     if (r != LIBUSB_SUCCESS)
     {
+        usbi_warn(dev_handle->dev->ctx, "Failed to set configuration to %i (%s)", config, libusb_error_name(r));
         return LIBUSB_ERROR_IO;
     }
 
@@ -679,6 +717,7 @@ static int winrt_claim_interface(libusb_device_handle *dev_handle, uint8_t iface
         dev_handle->dev->ctx,
         [&]()
         {
+            // Looking for DeviceInstanceId which contains "MI_XX"
             return DeviceInformation::FindAllAsync(
                 L"System.Devices.ContainerId:=\"" + priv->container_id + L"\""
                 L" AND System.Devices.DeviceInstanceId:~~\"MI_" + ifaceStr + L"\"",
@@ -690,10 +729,12 @@ static int winrt_claim_interface(libusb_device_handle *dev_handle, uint8_t iface
 
     if (status == winrt::Windows::Foundation::AsyncStatus::Canceled)
     {
+        usbi_warn(dev_handle->dev->ctx, "Timeout occurred while querying for USB interface");
         return LIBUSB_ERROR_TIMEOUT;
     }
     else if (status != winrt::Windows::Foundation::AsyncStatus::Completed)
     {
+        usbi_warn(dev_handle->dev->ctx, "Error occurred while querying for USB interface");
         return LIBUSB_ERROR_IO;
     }
     if (deviceInfos.Size() == 0)
@@ -810,6 +851,8 @@ static int winrt_release_interface(libusb_device_handle *dev_handle, uint8_t ifa
 
 static int winrt_set_interface_altsetting(libusb_device_handle *dev_handle, uint8_t iface, uint8_t altsetting)
 {
+    // TODO: test this
+
     winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(dev_handle->dev));
 
     try
@@ -823,7 +866,6 @@ static int winrt_set_interface_altsetting(libusb_device_handle *dev_handle, uint
         {
             if (itf.InterfaceNumber() == iface)
             {
-                // TODO: I think this is the proper interface, but I'm not completely sure
                 if (altsetting >= itf.InterfaceSettings().Size())
                 {
                     return LIBUSB_ERROR_NOT_FOUND;
@@ -839,10 +881,20 @@ static int winrt_set_interface_altsetting(libusb_device_handle *dev_handle, uint
 
                 if (status == winrt::Windows::Foundation::AsyncStatus::Canceled)
                 {
+                    usbi_warn(
+                        dev_handle->dev->ctx,
+                        "Timeout occurred while selecting altsetting %i",
+                        static_cast<int>(altsetting)
+                    );
                     return LIBUSB_ERROR_TIMEOUT;
                 }
                 else if (status != winrt::Windows::Foundation::AsyncStatus::Completed)
                 {
+                    usbi_warn(
+                        dev_handle->dev->ctx,
+                        "Error occurred while selecting altsetting %i",
+                        static_cast<int>(altsetting)
+                    );
                     return LIBUSB_ERROR_IO;
                 }
 
@@ -852,6 +904,12 @@ static int winrt_set_interface_altsetting(libusb_device_handle *dev_handle, uint
     }
     catch(const winrt::hresult_error& e)
     {
+        usbi_warn(
+            dev_handle->dev->ctx,
+            "Exception occurred while selecting altsetting %i: %s",
+            static_cast<int>(altsetting),
+            e.message().c_str()
+        );
         return LIBUSB_ERROR_IO;
     }
 
@@ -860,6 +918,8 @@ static int winrt_set_interface_altsetting(libusb_device_handle *dev_handle, uint
 
 static int winrt_clear_halt(libusb_device_handle *dev_handle, unsigned char endpoint)
 {
+    // TODO: test this
+
     winrt_device_handle_priv *handle_priv = static_cast<winrt_device_handle_priv*>(usbi_get_device_handle_priv(dev_handle));
 
     winrt::Windows::Foundation::AsyncStatus status = winrt::Windows::Foundation::AsyncStatus::Started;
@@ -937,10 +997,20 @@ static int winrt_clear_halt(libusb_device_handle *dev_handle, unsigned char endp
     }
     if (status == winrt::Windows::Foundation::AsyncStatus::Canceled)
     {
+        usbi_warn(
+            dev_handle->dev->ctx,
+            "Timeout occurred while trying to clear stall for endpoint %i",
+            static_cast<int>(endpoint)
+        );
         return LIBUSB_ERROR_TIMEOUT;
     }
     else if (status != winrt::Windows::Foundation::AsyncStatus::Completed)
     {
+        usbi_warn(
+            dev_handle->dev->ctx,
+            "Error occurred while trying to clear stall for endpoint %i",
+            static_cast<int>(endpoint)
+        );
         return LIBUSB_ERROR_IO;
     }
 
@@ -949,6 +1019,8 @@ static int winrt_clear_halt(libusb_device_handle *dev_handle, unsigned char endp
 
 static int winrt_reset_device(libusb_device_handle *dev_handle)
 {
+    // TODO: test this
+
     winrt_device_handle_priv *handle_priv = static_cast<winrt_device_handle_priv*>(usbi_get_device_handle_priv(dev_handle));
 
     for (std::pair<const uint8_t, winrt_interface>& itf : handle_priv->interfaces)
@@ -1211,6 +1283,8 @@ static int winrt_submit_bulk_transfer(usbi_transfer *itransfer)
 
 static int winrt_submit_interrupt_transfer(usbi_transfer *itransfer)
 {
+    // TODO: test this
+
     libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
     winrt_transfer_priv *tpriv = static_cast<winrt_transfer_priv*>(usbi_get_transfer_priv(itransfer));
     winrt_device_handle_priv *handle_priv = static_cast<winrt_device_handle_priv*>(usbi_get_device_handle_priv(transfer->dev_handle));
@@ -1434,9 +1508,11 @@ static int winrt_pop_transfer_from_queue(usbi_transfer *itransfer, winrt_transfe
                 return winrt_submit_interrupt_transfer(itransfer);
 
             case LIBUSB_TRANSFER_TYPE_ISOCHRONOUS:
+                usbi_err(TRANSFER_CTX(transfer), "ISOCHRONOUS transfer type not supported by winrt");
                 return LIBUSB_ERROR_NOT_SUPPORTED;
 
             default:
+                usbi_err(TRANSFER_CTX(transfer), "unknown endpoint type %d", transfer->type);
                 return LIBUSB_ERROR_INVALID_PARAM;
         }
     }
