@@ -1082,6 +1082,7 @@ static int winrt_submit_control_transfer(usbi_transfer *itransfer)
     {
         // IN transfer
         auto outputBuffer = Streams::Buffer(setup->wLength);
+        // TODO: this needs to be surrounded by try/catch because an exception will be thrown if disconnected
         auto asyncOp = priv->default_device.SendControlInTransferAsync(setupPacket, outputBuffer);
 
         // This is capturing by value to keep the reference back to async operation
@@ -1114,6 +1115,7 @@ static int winrt_submit_control_transfer(usbi_transfer *itransfer)
             }
             else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Error)
             {
+                // TODO: error may occur if disconnected too
                 status = LIBUSB_TRANSFER_STALL;
             }
             else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Canceled)
@@ -1131,6 +1133,7 @@ static int winrt_submit_control_transfer(usbi_transfer *itransfer)
         dataWriter.WriteBytes(winrt::array_view<const uint8_t>(transfer->buffer + LIBUSB_CONTROL_SETUP_SIZE, setup->wLength));
         auto inputBuffer = dataWriter.DetachBuffer();
 
+        // TODO: this needs to be surrounded by try/catch because an exception will be thrown if disconnected
         auto asyncOp = priv->default_device.SendControlOutTransferAsync(setupPacket, inputBuffer);
 
         // This is capturing by value to keep the reference back to async operation
@@ -1150,6 +1153,7 @@ static int winrt_submit_control_transfer(usbi_transfer *itransfer)
             }
             else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Error)
             {
+                // TODO: error may occur if disconnected too
                 status = LIBUSB_TRANSFER_STALL;
             }
             else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Canceled)
@@ -1183,6 +1187,7 @@ static int winrt_submit_bulk_transfer(usbi_transfer *itransfer)
             {
                 if (eps.first == transfer->endpoint)
                 {
+                    // TODO: this needs to be surrounded by try/catch because an exception will be thrown if disconnected
                     auto asyncOp = eps.second.InputStream().ReadAsync(
                         outputBuffer,
                         transfer->length,
@@ -1219,6 +1224,7 @@ static int winrt_submit_bulk_transfer(usbi_transfer *itransfer)
                         }
                         else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Error)
                         {
+                            // TODO: error may occur if disconnected too
                             status = LIBUSB_TRANSFER_STALL;
                         }
                         else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Canceled)
@@ -1247,6 +1253,7 @@ static int winrt_submit_bulk_transfer(usbi_transfer *itransfer)
             {
                 if (eps.first == transfer->endpoint)
                 {
+                    // TODO: this needs to be surrounded by try/catch because an exception will be thrown if disconnected
                     auto asyncOp = eps.second.OutputStream().WriteAsync(inputBuffer);
 
                     // This is capturing by value to keep the reference back to async operation
@@ -1266,6 +1273,7 @@ static int winrt_submit_bulk_transfer(usbi_transfer *itransfer)
                         }
                         else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Error)
                         {
+                            // TODO: error may occur if disconnected too
                             status = LIBUSB_TRANSFER_STALL;
                         }
                         else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Canceled)
@@ -1304,6 +1312,7 @@ static int winrt_submit_interrupt_transfer(usbi_transfer *itransfer)
             {
                 if (eps.first == transfer->endpoint)
                 {
+                    // TODO: this needs to be surrounded by try/catch because an exception will be thrown if disconnected
                     eps.second.DataReceived(
                         [itransfer](winrt::Windows::Devices::Usb::UsbInterruptInPipe pipe, winrt::Windows::Devices::Usb::UsbInterruptInEventArgs args)
                         {
@@ -1352,6 +1361,7 @@ static int winrt_submit_interrupt_transfer(usbi_transfer *itransfer)
             {
                 if (eps.first == transfer->endpoint)
                 {
+                    // TODO: this needs to be surrounded by try/catch because an exception will be thrown if disconnected
                     auto asyncOp = eps.second.OutputStream().WriteAsync(inputBuffer);
 
                     // This is capturing by value to keep the reference back to async operation
@@ -1371,6 +1381,7 @@ static int winrt_submit_interrupt_transfer(usbi_transfer *itransfer)
                         }
                         else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Error)
                         {
+                            // TODO: error may occur if disconnected too
                             status = LIBUSB_TRANSFER_STALL;
                         }
                         else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Canceled)
