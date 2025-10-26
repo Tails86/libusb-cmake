@@ -18,12 +18,23 @@
  */
 
 #include "libusbi.h"
-#include "events_cpp_stl.h"
+#include "events_cpp_stl.h" // TODO: remove
 
 #include <cstdlib>
 #include <chrono>
 #include <mutex>
 #include <condition_variable>
+
+//! Enumerates the type of an event data from a raw pointer
+enum cpp_stl_event_type : int
+{
+    //! Initialization value - invalid event type
+    CPP_STL_EVENT_TYPE_UNKNOWN = 0,
+    //! Event event type
+    CPP_STL_EVENT_TYPE_EVENT = 1,
+    //! Timer event type
+    CPP_STL_EVENT_TYPE_TIMER = 2
+};
 
 #ifndef HAVE_CLOCK_GETTIME
 void usbi_get_monotonic_time(struct timespec *tp)
@@ -37,11 +48,16 @@ void usbi_get_monotonic_time(struct timespec *tp)
 }
 #endif
 
+//! All event access is serialized using this mutex
 static std::mutex event_mutex;
+//! All events are signaled using this condition variable
 static std::condition_variable event_cv;
 
 struct cpp_stl_usbi_event
 {
+    //! Enumerates the type of this event data from a raw pointer
+    const int type = CPP_STL_EVENT_TYPE_EVENT;
+    //! 1 when event signaled or 0 if event is cleared
     int event_occurred = 0;
 };
 
@@ -73,7 +89,11 @@ void usbi_clear_event(usbi_event_t *event)
 #ifdef HAVE_OS_TIMER
 struct cpp_stl_usbi_timer
 {
+    //! Enumerates the type of this event data from a raw pointer
+    const int type = CPP_STL_EVENT_TYPE_TIMER;
+    //! true when time is set and timer is waiting for expiration
     bool armed = false;
+    //! The time point of this timer using monotonic clock
     std::chrono::steady_clock::time_point time;
 };
 
@@ -85,7 +105,6 @@ int usbi_timer_valid(usbi_timer_t *timer)
 int usbi_create_timer(usbi_timer_t *timer)
 {
 	(*timer) = new cpp_stl_usbi_timer();
-
 	return 0;
 }
 
@@ -108,7 +127,6 @@ int usbi_arm_timer(usbi_timer_t *timer, const struct timespec *timeout)
 int usbi_disarm_timer(usbi_timer_t *timer)
 {
 	(*timer)->armed = false;
-
 	return 0;
 }
 #endif // HAVE_OS_TIMER
@@ -122,30 +140,29 @@ int usbi_alloc_event_data(struct libusb_context *ctx)
 	/* Event sources are only added during usbi_io_init(). We should not
 	 * be running this function again if the event data has already been
 	 * allocated. */
-	if (ctx->event_data) {
+	if (ctx->event_data)
+    {
 		usbi_warn(ctx, "program assertion failed - event data already allocated");
 		return LIBUSB_ERROR_OTHER;
 	}
 
 	ctx->event_data_cnt = 0;
 	for_each_event_source(ctx, ievent_source)
+    {
 		ctx->event_data_cnt++;
-
-	/* We only expect up to two HANDLEs to wait on, one for the internal
-	 * signalling event and the other for the timer. */
-	if (ctx->event_data_cnt != 1 && ctx->event_data_cnt != 2) {
-		usbi_err(ctx, "program assertion failed - expected exactly 1 or 2 HANDLEs");
-		return LIBUSB_ERROR_OTHER;
-	}
+    }
 
     // Note: free(ctx->event_data) is called in io.c
 	handles = static_cast<void**>(calloc(ctx->event_data_cnt, sizeof(void*)));
 	if (!handles)
+    {
 		return LIBUSB_ERROR_NO_MEM;
+    }
 
-	for_each_event_source(ctx, ievent_source) {
-        // ievent_source->data.os_handle holds the allocated pointers to event and timer
-		handles[i] = ievent_source->data.os_handle;
+	for_each_event_source(ctx, ievent_source)
+    {
+        // ievent_source->data.os_handle holds pointers to allocated pointers to event and timer
+		handles[i] = *static_cast<void**>(ievent_source->data.os_handle);
 		i++;
 	}
 
@@ -160,7 +177,9 @@ int usbi_wait_for_events(struct libusb_context *ctx, struct usbi_reported_events
 
 	usbi_dbg(ctx, "wait for %lu HANDLEs with timeout in %dms", static_cast<unsigned long>(num_handles), timeout_ms);
 
-    // This value will remain 0 because events don't need to be handled by back end
+    std::chrono::time_point expiration = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+
+    // This value will remain 0 because events don't need to be handled by back-end using this platform
     reported_events->num_ready = 0;
 
     reported_events->event_triggered = 0;
@@ -170,21 +189,18 @@ int usbi_wait_for_events(struct libusb_context *ctx, struct usbi_reported_events
     bool timerElapsedOnTimeout = false;
     if (usbi_using_timer(ctx))
     {
-        if (num_handles > 1)
+        for (int i = 0; i < num_handles; ++i)
         {
-            cpp_stl_usbi_timer *tmr = static_cast<cpp_stl_usbi_timer*>(handles[1]);
-            if (tmr->armed)
+            cpp_stl_usbi_timer *tmr = static_cast<cpp_stl_usbi_timer*>(handles[i]);
+            if (tmr->type == CPP_STL_EVENT_TYPE_TIMER && tmr->armed)
             {
-                auto now = std::chrono::steady_clock::now();
                 std::chrono::milliseconds tmrTimeoutMs(0);
-                if (tmr->time > now)
+                if (tmr->time < expiration)
                 {
-                    tmrTimeoutMs = std::chrono::duration_cast<std::chrono::milliseconds>(tmr->time - now);
-                }
-                if (tmrTimeoutMs.count() <= timeout_ms)
-                {
+                    // Change expiration to timer's time
+                    expiration = tmr->time;
                     timerElapsedOnTimeout = true;
-                    timeout_ms = tmrTimeoutMs.count();
+                    break;
                 }
             }
         }
@@ -194,18 +210,23 @@ int usbi_wait_for_events(struct libusb_context *ctx, struct usbi_reported_events
     if (num_handles > 0)
     {
         std::unique_lock<std::mutex> lock(event_mutex);
-        bool status = event_cv.wait_for(
+        bool status = event_cv.wait_until(
             lock,
-            std::chrono::milliseconds(timeout_ms),
+            expiration,
             [&handles, &num_handles, &reported_events]()
             {
                 bool trigger = false;
-                cpp_stl_usbi_event *ev = static_cast<cpp_stl_usbi_event*>(handles[0]);
 
-                if (ev->event_occurred)
+                for (int i = 0; i < num_handles; ++i)
                 {
-                    trigger = true;
-                    reported_events->event_triggered = 1;
+                    cpp_stl_usbi_event *ev = static_cast<cpp_stl_usbi_event*>(handles[0]);
+
+                    if (ev->type == CPP_STL_EVENT_TYPE_EVENT && ev->event_occurred)
+                    {
+                        trigger = true;
+                        reported_events->event_triggered = 1;
+                        break;
+                    }
                 }
 
                 return trigger;
@@ -217,18 +238,6 @@ int usbi_wait_for_events(struct libusb_context *ctx, struct usbi_reported_events
         {
             reported_events->timer_triggered = 1;
             status = true;
-        }
-        else if (status && usbi_using_timer(ctx))
-        {
-            cpp_stl_usbi_timer *tmr = static_cast<cpp_stl_usbi_timer*>(handles[1]);
-            if (tmr->armed)
-            {
-                auto now = std::chrono::steady_clock::now();
-                if (now >= tmr->time)
-                {
-                    reported_events->timer_triggered = 1;
-                }
-            }
         }
 #endif
 

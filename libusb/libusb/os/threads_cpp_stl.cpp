@@ -28,6 +28,7 @@
 #include <thread>
 #include <unordered_map>
 
+// The static mutex to serialize check-and-set logic for mutex_static
 static std::mutex static_mutex;
 
 struct cpp_stl_usbi_mutex_static
@@ -36,6 +37,7 @@ struct cpp_stl_usbi_mutex_static
 };
 
 // This is here just to ensure these mutexes are properly deleted on program exit
+// mutex_static is assumed to have a lifespan until application exit
 static std::list<std::unique_ptr<cpp_stl_usbi_mutex_static>> static_mutex_list;
 
 static usbi_mutex_static_t new_usbi_mutex_static()
@@ -61,7 +63,7 @@ void usbi_mutex_static_lock(usbi_mutex_static_t *mutex)
 }
 void usbi_mutex_static_unlock(usbi_mutex_static_t *mutex)
 {
-    // TODO: assert (*mutex) is not null (assume usbi_mutex_static_lock previously called)
+    assert((*mutex) != NULL);
     (*mutex)->mtx.unlock();
 }
 
