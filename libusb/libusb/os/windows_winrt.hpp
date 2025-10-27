@@ -57,10 +57,10 @@ struct winrt_transfer_queue
 
 struct winrt_device_priv
 {
-    //! The active configuration
-    uint8_t active_config = 1;
+    //! The active configuration (0 if not retrieved yet)
+    uint8_t active_config = 0;
 
-    //! Stores each configuration descriptor once opened
+    //! Stores each configuration descriptor (only filled once any descriptor is requested)
     std::vector<std::vector<uint8_t>> config_descriptors;
 
     //! String representation of System.Devices.ContainerId for this device

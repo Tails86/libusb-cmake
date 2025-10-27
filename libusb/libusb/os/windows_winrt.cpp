@@ -247,6 +247,11 @@ static int winrt_send_control_transfer_in(
     winrt::array_view<uint8_t> dat
 )
 {
+    if (!dev)
+    {
+        return LIBUSB_ERROR_NO_DEVICE;
+    }
+
     winrt::Windows::Foundation::AsyncStatus status;
     auto outputBuffer = Streams::Buffer(setupPacket.Length());
     auto buf = winrt_handle_async<Streams::IBuffer>(
@@ -474,106 +479,6 @@ static int winrt_open(libusb_device_handle *dev_handle)
             priv->default_device = winrtDev;
             priv->default_device_id = deviceInfo.Id();
 
-            // Get the active configuration number
-            auto setupPacket = UsbSetupPacket();
-            setupPacket.RequestType().Direction(UsbTransferDirection::In);
-            setupPacket.RequestType().ControlTransferType(UsbControlTransferType::Standard);
-            setupPacket.RequestType().Recipient(UsbControlRecipient::Device);
-            setupPacket.Request(LIBUSB_REQUEST_GET_CONFIGURATION);
-            setupPacket.Value(0);
-            setupPacket.Index(0);
-            setupPacket.Length(1);
-
-            std::vector<uint8_t> activeConfigData(1);
-            int r = winrt_send_control_transfer_in(dev_handle->dev->ctx, winrtDev, setupPacket, activeConfigData);
-
-            if (r != LIBUSB_SUCCESS)
-            {
-                usbi_warn(
-                    dev_handle->dev->ctx,
-                    "Failed to retrieve active configuration value (%s) using device %s",
-                    libusb_error_name(r),
-                    deviceInfo.Id().c_str()
-                );
-
-                commFail = true;
-
-                // Try next device
-                continue;
-            }
-
-            priv->active_config = activeConfigData[0];
-
-            bool descRetrievalFailed = false;
-            priv->config_descriptors.resize(dev_handle->dev->device_descriptor.bNumConfigurations);
-            for (uint8_t i = 0; i < dev_handle->dev->device_descriptor.bNumConfigurations; ++i)
-            {
-                // The data within winrtDev.Configuration().Descriptors() is often incorrect for some reason.
-                // The best bet is to simply send a control transfer.
-                setupPacket = UsbSetupPacket();
-                setupPacket.RequestType().Direction(UsbTransferDirection::In);
-                setupPacket.RequestType().ControlTransferType(UsbControlTransferType::Standard);
-                setupPacket.RequestType().Recipient(UsbControlRecipient::Device);
-                setupPacket.Request(LIBUSB_REQUEST_GET_DESCRIPTOR);
-                setupPacket.Value((LIBUSB_DT_CONFIG << 8) | i); // configuration descriptor with index
-                setupPacket.Index(0);
-                setupPacket.Length(LIBUSB_DT_CONFIG_SIZE);
-
-                priv->config_descriptors[i].resize(LIBUSB_DT_CONFIG_SIZE);
-                r = winrt_send_control_transfer_in(
-                    dev_handle->dev->ctx,
-                    winrtDev,
-                    setupPacket,
-                    priv->config_descriptors[i]
-                );
-
-                if (r != LIBUSB_SUCCESS)
-                {
-                    usbi_warn(
-                        dev_handle->dev->ctx,
-                        "Failed to retrieve configuration descriptor header (%s) using device %s",
-                        libusb_error_name(r),
-                        deviceInfo.Id().c_str()
-                    );
-
-                    descRetrievalFailed = true;
-
-                    break;
-                }
-
-                // Get full length
-                uint16_t realLen = ReadLittleEndian16(&priv->config_descriptors[i][2]);
-                setupPacket.Length(realLen);
-                priv->config_descriptors[i].resize(realLen);
-                r = winrt_send_control_transfer_in(
-                    dev_handle->dev->ctx,
-                    winrtDev,
-                    setupPacket,
-                    priv->config_descriptors[i]
-                );
-
-                if (r != LIBUSB_SUCCESS)
-                {
-                    usbi_warn(
-                        dev_handle->dev->ctx,
-                        "Failed to retrieve full configuration descriptor (%s) using device %s",
-                        libusb_error_name(r),
-                        deviceInfo.Id().c_str()
-                    );
-
-                    descRetrievalFailed = true;
-
-                    break;
-                }
-            }
-
-            if (descRetrievalFailed)
-            {
-                commFail = true;
-                // Try next device
-                continue;
-            }
-
             return LIBUSB_SUCCESS;
         }
     }
@@ -589,6 +494,83 @@ static void winrt_close(libusb_device_handle *dev_handle)
     handle_priv->~winrt_device_handle_priv();
 }
 
+static int winrt_request_descriptors(libusb_device *dev)
+{
+    winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(dev));
+
+    if (!priv->config_descriptors.empty())
+    {
+        // Already initialized
+        return LIBUSB_SUCCESS;
+    }
+
+    priv->config_descriptors.resize(dev->device_descriptor.bNumConfigurations);
+    for (uint8_t i = 0; i < dev->device_descriptor.bNumConfigurations; ++i)
+    {
+        // The data within winrtDev.Configuration().Descriptors() is often incorrect for some reason.
+        // The best bet is to simply send a control transfer.
+        auto setupPacket = UsbSetupPacket();
+        setupPacket.RequestType().Direction(UsbTransferDirection::In);
+        setupPacket.RequestType().ControlTransferType(UsbControlTransferType::Standard);
+        setupPacket.RequestType().Recipient(UsbControlRecipient::Device);
+        setupPacket.Request(LIBUSB_REQUEST_GET_DESCRIPTOR);
+        setupPacket.Value((LIBUSB_DT_CONFIG << 8) | i); // configuration descriptor with index
+        setupPacket.Index(0);
+        setupPacket.Length(LIBUSB_DT_CONFIG_SIZE);
+
+        priv->config_descriptors[i].resize(LIBUSB_DT_CONFIG_SIZE);
+        int r = winrt_send_control_transfer_in(
+            dev->ctx,
+            priv->default_device,
+            setupPacket,
+            priv->config_descriptors[i]
+        );
+
+        if (r != LIBUSB_SUCCESS)
+        {
+            usbi_warn(
+                dev->ctx,
+                "Failed to retrieve configuration descriptor header (%s) using device %s",
+                libusb_error_name(r),
+                priv->default_device_id.c_str()
+            );
+
+            // Clear so we know this structure is still invalid
+            priv->config_descriptors.clear();
+
+            return r;
+        }
+
+        // Get full length
+        uint16_t realLen = ReadLittleEndian16(&priv->config_descriptors[i][2]);
+        setupPacket.Length(realLen);
+        priv->config_descriptors[i].resize(realLen);
+        r = winrt_send_control_transfer_in(
+            dev->ctx,
+            priv->default_device,
+            setupPacket,
+            priv->config_descriptors[i]
+        );
+
+        if (r != LIBUSB_SUCCESS)
+        {
+            usbi_warn(
+                dev->ctx,
+                "Failed to retrieve full configuration descriptor (%s) using device %s",
+                libusb_error_name(r),
+                priv->default_device_id.c_str()
+            );
+
+            // Clear so we know this structure is still invalid
+            priv->config_descriptors.clear();
+
+            return r;
+        }
+    }
+
+    return LIBUSB_SUCCESS;
+}
+
 static int winrt_get_config_descriptor_by_value(
     libusb_device *dev,
     uint8_t bConfigurationValue,
@@ -596,6 +578,12 @@ static int winrt_get_config_descriptor_by_value(
 )
 {
     winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(dev));
+
+    int r = winrt_request_descriptors(dev);
+    if (r != LIBUSB_SUCCESS)
+    {
+        return (r < 0) ? r : -1;
+    }
 
     if (bConfigurationValue == 0 || (bConfigurationValue - 1) >= priv->config_descriptors.size())
     {
@@ -606,14 +594,52 @@ static int winrt_get_config_descriptor_by_value(
     return static_cast<int>(priv->config_descriptors[bConfigurationValue - 1].size());
 }
 
+static int winrt_request_active_config(libusb_device *dev)
+{
+    winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(dev));
+
+    if (priv->active_config == 0)
+    {
+        // Get the active configuration number
+        auto setupPacket = UsbSetupPacket();
+        setupPacket.RequestType().Direction(UsbTransferDirection::In);
+        setupPacket.RequestType().ControlTransferType(UsbControlTransferType::Standard);
+        setupPacket.RequestType().Recipient(UsbControlRecipient::Device);
+        setupPacket.Request(LIBUSB_REQUEST_GET_CONFIGURATION);
+        setupPacket.Value(0);
+        setupPacket.Index(0);
+        setupPacket.Length(1);
+
+        std::vector<uint8_t> activeConfigData(1);
+        int r = winrt_send_control_transfer_in(dev->ctx, priv->default_device, setupPacket, activeConfigData);
+
+        if (r != LIBUSB_SUCCESS)
+        {
+            return r;
+        }
+
+        priv->active_config = activeConfigData[0];
+    }
+
+    return LIBUSB_SUCCESS;
+}
+
 static int winrt_get_active_config_descriptor(libusb_device *dev, void *buffer, size_t len)
 {
     winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(dev));
     void *config_desc;
 
-    int r = winrt_get_config_descriptor_by_value(dev, priv->active_config, &config_desc);
-    if (r < 0)
+    int r = winrt_request_active_config(dev);
+    if (r != LIBUSB_SUCCESS)
+    {
         return r;
+    }
+
+    r = winrt_get_config_descriptor_by_value(dev, priv->active_config, &config_desc);
+    if (r < 0)
+    {
+        return r;
+    }
 
     len = MIN(len, (size_t)r);
     memcpy(buffer, config_desc, len);
@@ -623,6 +649,12 @@ static int winrt_get_active_config_descriptor(libusb_device *dev, void *buffer, 
 static int winrt_get_config_descriptor(libusb_device *dev, uint8_t config_index, void *buffer, size_t len)
 {
 	winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(dev));
+
+    int r = winrt_request_descriptors(dev);
+    if (r != LIBUSB_SUCCESS)
+    {
+        return (r < 0) ? r : -1;
+    }
 
     if (config_index >= priv->config_descriptors.size())
     {
@@ -640,6 +672,12 @@ static int winrt_get_config_descriptor(libusb_device *dev, uint8_t config_index,
 static int winrt_get_configuration(libusb_device_handle *dev_handle, uint8_t *config)
 {
     winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(dev_handle->dev));
+
+    int r = winrt_request_active_config(dev_handle->dev);
+    if (r != LIBUSB_SUCCESS)
+    {
+        return r;
+    }
 
     *config = priv->active_config;
     return LIBUSB_SUCCESS;
@@ -1095,15 +1133,6 @@ static int winrt_submit_control_transfer(usbi_transfer *itransfer)
             {
                 try {
                     auto buffer = sender.GetResults();
-                    // // Debug: Print buffer contents as hex
-                    // printf("Buffer length: %u, data: ", static_cast<unsigned int>(buffer.Length()));
-                    // auto dataReader2 = Streams::DataReader::FromBuffer(buffer);
-                    // std::vector<uint8_t> hexData(buffer.Length());
-                    // dataReader2.ReadBytes(hexData);
-                    // for (size_t i = 0; i < hexData.size(); i++) {
-                    //     printf("%02x ", hexData[i]);
-                    // }
-                    // printf("\n");
                     if (buffer && buffer.Length() <= transfer->length - LIBUSB_CONTROL_SETUP_SIZE) {
                         auto dataReader = Streams::DataReader::FromBuffer(buffer);
                         dataReader.ReadBytes(winrt::array_view<uint8_t>(transfer->buffer + LIBUSB_CONTROL_SETUP_SIZE, buffer.Length()));
@@ -1185,6 +1214,7 @@ static int winrt_submit_bulk_transfer(usbi_transfer *itransfer)
         {
             for (std::pair<const uint8_t, winrt::Windows::Devices::Usb::UsbBulkInPipe>& eps : itf.second.bulk_in_pipes)
             {
+
                 if (eps.first == transfer->endpoint)
                 {
                     // TODO: this needs to be surrounded by try/catch because an exception will be thrown if disconnected
@@ -1197,23 +1227,15 @@ static int winrt_submit_bulk_transfer(usbi_transfer *itransfer)
                     // This is capturing by value to keep the reference back to async operation
                     tpriv->cancel_fn = [asyncOp](){asyncOp.Cancel();};
 
-                    asyncOp.Completed([itransfer](auto const& sender, auto const& args) {
+                    asyncOp.Completed([&dev=itf.second.device, itransfer](auto const& sender, auto const& args) {
                         libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
                         libusb_transfer_status status = LIBUSB_TRANSFER_ERROR;
                         if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Completed)
                         {
                             try {
                                 auto buffer = sender.GetResults();
-                                // // Debug: Print buffer contents as hex
-                                // printf("Buffer length: %u, data: ", static_cast<unsigned int>(buffer.Length()));
-                                // auto dataReader2 = Streams::DataReader::FromBuffer(buffer);
-                                // std::vector<uint8_t> hexData(buffer.Length());
-                                // dataReader2.ReadBytes(hexData);
-                                // for (size_t i = 0; i < hexData.size(); i++) {
-                                //     printf("%02x ", hexData[i]);
-                                // }
-                                // printf("\n");
-                                if (buffer && buffer.Length() <= transfer->length) {
+                                if (buffer && buffer.Length() <= transfer->length)
+                                {
                                     auto dataReader = Streams::DataReader::FromBuffer(buffer);
                                     dataReader.ReadBytes(winrt::array_view<uint8_t>(transfer->buffer, buffer.Length()));
                                     itransfer->transferred = buffer.Length();
@@ -1224,6 +1246,7 @@ static int winrt_submit_bulk_transfer(usbi_transfer *itransfer)
                         }
                         else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Error)
                         {
+                            // sender.ErrorCode().value will have winerr value, but I get 0x8007001F which means nothing
                             // TODO: error may occur if disconnected too
                             status = LIBUSB_TRANSFER_STALL;
                         }
