@@ -1204,14 +1204,7 @@ static int winrt_submit_control_transfer(usbi_transfer *itransfer)
                 e.message().c_str()
             );
 
-            if (e.code().value == ERROR_BAD_COMMAND)
-            {
-                return LIBUSB_ERROR_NO_DEVICE;
-            }
-            else
-            {
-                return LIBUSB_ERROR_IO;
-            }
+            return LIBUSB_ERROR_NO_DEVICE;
         }
 
         // This is capturing by value to keep the reference back to async operation
@@ -1266,14 +1259,7 @@ static int winrt_submit_control_transfer(usbi_transfer *itransfer)
                 e.message().c_str()
             );
 
-            if (e.code().value == ERROR_BAD_COMMAND)
-            {
-                return LIBUSB_ERROR_NO_DEVICE;
-            }
-            else
-            {
-                return LIBUSB_ERROR_IO;
-            }
+            return LIBUSB_ERROR_NO_DEVICE;
         }
 
         // This is capturing by value to keep the reference back to async operation
@@ -1345,14 +1331,7 @@ static int winrt_submit_bulk_transfer(usbi_transfer *itransfer)
                             e.message().c_str()
                         );
 
-                        if (e.code().value == ERROR_BAD_COMMAND)
-                        {
-                            return LIBUSB_ERROR_NO_DEVICE;
-                        }
-                        else
-                        {
-                            return LIBUSB_ERROR_IO;
-                        }
+                        return LIBUSB_ERROR_NO_DEVICE;
                     }
 
                     // This is capturing by value to keep the reference back to async operation
@@ -1420,14 +1399,7 @@ static int winrt_submit_bulk_transfer(usbi_transfer *itransfer)
                             e.message().c_str()
                         );
 
-                        if (e.code().value == ERROR_BAD_COMMAND)
-                        {
-                            return LIBUSB_ERROR_NO_DEVICE;
-                        }
-                        else
-                        {
-                            return LIBUSB_ERROR_IO;
-                        }
+                        return LIBUSB_ERROR_NO_DEVICE;
                     }
 
                     // This is capturing by value to keep the reference back to async operation
@@ -1521,14 +1493,7 @@ static int winrt_submit_interrupt_transfer(usbi_transfer *itransfer)
                             e.message().c_str()
                         );
 
-                        if (e.code().value == ERROR_BAD_COMMAND)
-                        {
-                            return LIBUSB_ERROR_NO_DEVICE;
-                        }
-                        else
-                        {
-                            return LIBUSB_ERROR_IO;
-                        }
+                        return LIBUSB_ERROR_NO_DEVICE;
                     }
 
                     tpriv->cancel_fn = [itransfer, pipe = eps.second](){
@@ -1568,14 +1533,7 @@ static int winrt_submit_interrupt_transfer(usbi_transfer *itransfer)
                             e.message().c_str()
                         );
 
-                        if (e.code().value == ERROR_BAD_COMMAND)
-                        {
-                            return LIBUSB_ERROR_NO_DEVICE;
-                        }
-                        else
-                        {
-                            return LIBUSB_ERROR_IO;
-                        }
+                        return LIBUSB_ERROR_NO_DEVICE;
                     }
 
                     // This is capturing by value to keep the reference back to async operation
