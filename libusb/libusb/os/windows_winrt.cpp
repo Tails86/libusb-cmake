@@ -1102,7 +1102,12 @@ static int winrt_clear_halt(libusb_device_handle *dev_handle, unsigned char endp
 
     if (r != LIBUSB_SUCCESS)
     {
-        usbi_warn(dev_handle->dev->ctx, "Failed to clear stall on endpoint 0 (%s)", libusb_error_name(r));
+        usbi_warn(
+            dev_handle->dev->ctx,
+            "Failed to clear stall on endpoint %i (%s)",
+            static_cast<int>(endpoint),
+            libusb_error_name(r)
+        );
         return r;
     }
 
