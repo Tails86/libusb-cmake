@@ -121,37 +121,46 @@ static T winrt_async_get(libusb_context *ctx, const std::function<T()>& getFn)
     return winrt_async_get<T>(ctx, getFn, nullptr);
 }
 
+template <typename T>
+struct winrt_handle_async_data
+{
+    //! libusb context, used for logging purposes
+    libusb_context *ctx;
+    //! The function which generates a IAsyncOperation<T>
+    std::function<winrt::Windows::Foundation::IAsyncOperation<T>()> asyncFn;
+    //! Duration to wait before timeout (statusOut will be set to Canceled on timeout)
+    const winrt::Windows::Foundation::TimeSpan& timeout = std::chrono::milliseconds(WINRT_STANDARD_TIMEOUT_MS);
+};
+
 //! Safely handles a winrt async operation, blocking until complete and returning the result
 //! @tparam T The result type to be retrieved
 //! @param[out] statusOut The status of the operation
-//! @param[in] ctx libusb context, used for logging purposes
-//! @param[in] asyncFn The function which generates a IAsyncOperation<T>
-//! @param[in] timeout Duration to wait before timeout (statusOut will be set to Canceled on timeout)
+//! @param[in] data Async transfer data
+//! @param[in] defaultVal The default value to return on exception
 //! @return the resulting value of the operation or nullptr if operation fails
 template <typename T>
 static T winrt_handle_async(
     winrt::Windows::Foundation::AsyncStatus& statusOut,
-    libusb_context *ctx,
-    const std::function<winrt::Windows::Foundation::IAsyncOperation<T>()>& asyncFn,
-    const winrt::Windows::Foundation::TimeSpan& timeout = std::chrono::milliseconds(WINRT_STANDARD_TIMEOUT_MS)
+    const winrt_handle_async_data<T>& data,
+    const T& defaultVal
 )
 {
     statusOut = winrt::Windows::Foundation::AsyncStatus::Started;
     return winrt_async_get<T>(
-        ctx,
+        data.ctx,
         [&]() -> T
         {
             winrt::Windows::Foundation::IAsyncOperation<T> asyncOp;
             try
             {
-                asyncOp = asyncFn();
-                statusOut = asyncOp.wait_for(timeout);
+                asyncOp = data.asyncFn();
+                statusOut = asyncOp.wait_for(data.timeout);
                 if (statusOut != winrt::Windows::Foundation::AsyncStatus::Completed)
                 {
                     statusOut = winrt::Windows::Foundation::AsyncStatus::Canceled;
                     asyncOp.Cancel();
                     asyncOp.get();
-                    return nullptr;
+                    return defaultVal;
                 }
                 return asyncOp.get();
 
@@ -159,17 +168,32 @@ static T winrt_handle_async(
             catch(const winrt::hresult_error& e)
             {
                 // Execution error occurred
-                usbi_warn(ctx, "winrt_handle_async failed with exception: %s", winrt::to_string(e.message()).c_str());
+                usbi_warn(data.ctx, "winrt_handle_async failed with exception: %s", winrt::to_string(e.message()).c_str());
                 statusOut = winrt::Windows::Foundation::AsyncStatus::Error;
                 if (asyncOp)
                 {
                     asyncOp.Cancel();
                     asyncOp.get();
                 }
-                return nullptr;
+                return defaultVal;
             }
-        }
+        },
+        defaultVal
     );
+}
+
+//! Safely handles a winrt async operation, blocking until complete and returning the result
+//! @tparam T The result type to be retrieved
+//! @param[out] statusOut The status of the operation
+//! @param[in] data Async transfer data
+//! @return the resulting value of the operation or nullptr if operation fails
+template <typename T>
+static T winrt_handle_async(
+    winrt::Windows::Foundation::AsyncStatus& statusOut,
+    const winrt_handle_async_data<T>& data
+)
+{
+    return winrt_handle_async<T>(statusOut, data, nullptr);
 }
 
 //! Safely handles a winrt async operation, blocking until complete and returning the result
@@ -179,14 +203,10 @@ static T winrt_handle_async(
 //! @param[in] timeout Duration to wait before timeout (statusOut will be set to Canceled on timeout)
 //! @return the resulting value of the operation or nullptr if operation fails
 template <typename T>
-static T winrt_handle_async(
-    libusb_context *ctx,
-    const std::function<winrt::Windows::Foundation::IAsyncOperation<T>()>& asyncFn,
-    const winrt::Windows::Foundation::TimeSpan& timeout = std::chrono::milliseconds(WINRT_STANDARD_TIMEOUT_MS)
-)
+static T winrt_handle_async(const winrt_handle_async_data<T>& data)
 {
     winrt::Windows::Foundation::AsyncStatus status;
-    return winrt_handle_async<T>(status, ctx, asyncFn, timeout);
+    return winrt_handle_async<T>(status, data);
 }
 
 //! Safely handles a winrt async action operation, blocking until complete and returning the result
@@ -234,7 +254,7 @@ winrt::Windows::Foundation::AsyncStatus winrt_handle_async_action(
     );
 }
 
-//! Executes a control transfer, blocking until complete, timeout, or error
+//! Executes a control transfer IN, blocking until complete, timeout, or error
 //! @param[in] ctx The libusb context executing this
 //! @param[in] dev winrt UsbDevice to execute the control transfer on
 //! @param[in] setupPacket Control transfer header data
@@ -252,14 +272,22 @@ static int winrt_send_control_transfer_in(
         return LIBUSB_ERROR_NO_DEVICE;
     }
 
+    if (setupPacket.RequestType().Direction() != UsbTransferDirection::In)
+    {
+        usbi_err(ctx, "winrt_send_control_transfer_in received setup packet with OUT direction (internal error)");
+        return LIBUSB_ERROR_OTHER;
+    }
+
     winrt::Windows::Foundation::AsyncStatus status;
     auto outputBuffer = Streams::Buffer(setupPacket.Length());
     auto buf = winrt_handle_async<Streams::IBuffer>(
         status,
-        ctx,
-        [&]()
         {
-            return dev.SendControlInTransferAsync(setupPacket, outputBuffer);
+            ctx,
+            [&]()
+            {
+                return dev.SendControlInTransferAsync(setupPacket, outputBuffer);
+            }
         }
     );
 
@@ -276,6 +304,60 @@ static int winrt_send_control_transfer_in(
 
     auto dataReader = winrt::Windows::Storage::Streams::DataReader::FromBuffer(buf);
     dataReader.ReadBytes(dat);
+
+    return LIBUSB_SUCCESS;
+}
+
+//! Executes a control transfer OUT, blocking until complete, timeout, or error
+//! @param[in] ctx The libusb context executing this
+//! @param[in] dev winrt UsbDevice to execute the control transfer on
+//! @param[in] setupPacket Control transfer header data
+//! @param[in] dat The data to send
+//! @return a libusb error code
+static int winrt_send_control_transfer_out(
+    libusb_context *ctx,
+    winrt::Windows::Devices::Usb::UsbDevice& dev,
+    const UsbSetupPacket& setupPacket,
+    winrt::array_view<uint8_t> dat = {}
+)
+{
+    if (!dev)
+    {
+        return LIBUSB_ERROR_NO_DEVICE;
+    }
+
+    if (setupPacket.RequestType().Direction() != UsbTransferDirection::Out)
+    {
+        usbi_err(ctx, "winrt_send_control_transfer_out received setup packet with IN direction (internal error)");
+        return LIBUSB_ERROR_OTHER;
+    }
+
+    winrt::Windows::Foundation::AsyncStatus status;
+    auto dataWriter = Streams::DataWriter();
+    dataWriter.WriteBytes(dat);
+    auto inputBuffer = dataWriter.DetachBuffer();
+    uint32_t result = winrt_handle_async<uint32_t>(
+        status,
+        {
+            ctx,
+            [&]()
+            {
+                return dev.SendControlOutTransferAsync(setupPacket, inputBuffer);
+            }
+        },
+        0
+    );
+
+    if (status == winrt::Windows::Foundation::AsyncStatus::Canceled)
+    {
+        usbi_warn(ctx, "winrt_send_control_transfer_out timeout");
+        return LIBUSB_ERROR_TIMEOUT;
+    }
+    else if (status != winrt::Windows::Foundation::AsyncStatus::Completed || result < dat.size())
+    {
+        usbi_warn(ctx, "winrt_send_control_transfer_out failed");
+        return LIBUSB_ERROR_IO;
+    }
 
     return LIBUSB_SUCCESS;
 }
@@ -299,13 +381,15 @@ static int winrt_is_device_connected(libusb_context *ctx, const std::wstring& pa
     winrt::Windows::Foundation::AsyncStatus status = winrt::Windows::Foundation::AsyncStatus::Started;
     DeviceInformationCollection deviceInfos = winrt_handle_async<DeviceInformationCollection>(
         status,
-        ctx,
-        [&]()
         {
-            return DeviceInformation::FindAllAsync(
-                L"System.Devices.InterfaceEnabled:=System.StructuredQueryType.Boolean#True"
-                L" AND System.Devices.DeviceInstanceId:=\"" + path + L"\""
-            );
+            ctx,
+            [&]()
+            {
+                return DeviceInformation::FindAllAsync(
+                    L"System.Devices.InterfaceEnabled:=System.StructuredQueryType.Boolean#True"
+                    L" AND System.Devices.DeviceInstanceId:=\"" + path + L"\""
+                );
+            }
         }
     );
 
@@ -332,15 +416,17 @@ static int winrt_get_device_list(libusb_context *ctx, struct discovered_devs **_
     winrt::Windows::Foundation::AsyncStatus status = winrt::Windows::Foundation::AsyncStatus::Started;
     DeviceInformationCollection deviceInfos = winrt_handle_async<DeviceInformationCollection>(
         status,
-        ctx,
-        [&]()
         {
-            return DeviceInformation::FindAllAsync(
-                L"System.Devices.InterfaceEnabled:=System.StructuredQueryType.Boolean#True"
-                L" AND (System.Devices.DeviceInstanceId:~<\"USB\\\" OR System.Devices.DeviceInstanceId:~<\"HID\\\")",
-                additionalProperties,
-                DeviceInformationKind::DeviceInterface
-            );
+            ctx,
+            [&]()
+            {
+                return DeviceInformation::FindAllAsync(
+                    L"System.Devices.InterfaceEnabled:=System.StructuredQueryType.Boolean#True"
+                    L" AND (System.Devices.DeviceInstanceId:~<\"USB\\\" OR System.Devices.DeviceInstanceId:~<\"HID\\\")",
+                    additionalProperties,
+                    DeviceInformationKind::DeviceInterface
+                );
+            }
         }
     );
 
@@ -386,10 +472,12 @@ static int winrt_get_device_list(libusb_context *ctx, struct discovered_devs **_
                 dpriv->container_id = winrt::to_hstring(containerId);
 
                 UsbDevice winrtDev = winrt_handle_async<UsbDevice>(
-                    ctx,
-                    [&deviceInfo]()
                     {
-                        return UsbDevice::FromIdAsync(deviceInfo.Id());
+                        ctx,
+                        [&deviceInfo]()
+                        {
+                            return UsbDevice::FromIdAsync(deviceInfo.Id());
+                        }
                     }
                 );
 
@@ -467,14 +555,16 @@ static int winrt_open(libusb_device_handle *dev_handle)
     winrt::Windows::Foundation::AsyncStatus status = winrt::Windows::Foundation::AsyncStatus::Started;
     DeviceInformationCollection deviceInfos = winrt_handle_async<DeviceInformationCollection>(
         status,
-        dev_handle->dev->ctx,
-        [&]()
         {
-            return DeviceInformation::FindAllAsync(
-                L"System.Devices.ContainerId:=\"" + priv->container_id + L"\"",
-                additionalProperties,
-                DeviceInformationKind::DeviceInterface
-            );
+            dev_handle->dev->ctx,
+            [&]()
+            {
+                return DeviceInformation::FindAllAsync(
+                    L"System.Devices.ContainerId:=\"" + priv->container_id + L"\"",
+                    additionalProperties,
+                    DeviceInformationKind::DeviceInterface
+                );
+            }
         }
     );
 
@@ -497,10 +587,12 @@ static int winrt_open(libusb_device_handle *dev_handle)
     for (const DeviceInformation& deviceInfo : deviceInfos)
     {
         UsbDevice winrtDev = winrt_handle_async<UsbDevice>(
-            dev_handle->dev->ctx,
-            [&deviceInfo]()
             {
-                return UsbDevice::FromIdAsync(deviceInfo.Id());
+                dev_handle->dev->ctx,
+                [&deviceInfo]()
+                {
+                    return UsbDevice::FromIdAsync(deviceInfo.Id());
+                }
             }
         );
 
@@ -734,13 +826,12 @@ static int winrt_set_configuration(libusb_device_handle *dev_handle, int config)
     setupPacket.Index(0);
     setupPacket.Length(0);
 
-    std::vector<uint8_t> dummy;
-    int r = winrt_send_control_transfer_in(dev_handle->dev->ctx, priv->default_device.device, setupPacket, dummy);
+    int r = winrt_send_control_transfer_out(dev_handle->dev->ctx, priv->default_device.device, setupPacket);
 
     if (r != LIBUSB_SUCCESS)
     {
         usbi_warn(dev_handle->dev->ctx, "Failed to set configuration to %i (%s)", config, libusb_error_name(r));
-        return LIBUSB_ERROR_IO;
+        return r;
     }
 
 	priv->active_config = config;
@@ -783,16 +874,18 @@ static int winrt_claim_interface(libusb_device_handle *dev_handle, uint8_t iface
     winrt::Windows::Foundation::AsyncStatus status = winrt::Windows::Foundation::AsyncStatus::Started;
     DeviceInformationCollection deviceInfos = winrt_handle_async<DeviceInformationCollection>(
         status,
-        dev_handle->dev->ctx,
-        [&]()
         {
-            // Looking for DeviceInstanceId which contains "MI_XX"
-            return DeviceInformation::FindAllAsync(
-                L"System.Devices.ContainerId:=\"" + priv->container_id + L"\""
-                L" AND System.Devices.DeviceInstanceId:~~\"MI_" + ifaceStr + L"\"",
-                additionalProperties,
-                DeviceInformationKind::DeviceInterface
-            );
+            dev_handle->dev->ctx,
+            [&]()
+            {
+                // Looking for DeviceInstanceId which contains "MI_XX"
+                return DeviceInformation::FindAllAsync(
+                    L"System.Devices.ContainerId:=\"" + priv->container_id + L"\""
+                    L" AND System.Devices.DeviceInstanceId:~~\"MI_" + ifaceStr + L"\"",
+                    additionalProperties,
+                    DeviceInformationKind::DeviceInterface
+                );
+            }
         }
     );
 
@@ -827,10 +920,12 @@ static int winrt_claim_interface(libusb_device_handle *dev_handle, uint8_t iface
         else
         {
             winrtDev = winrt_handle_async<UsbDevice>(
-                dev_handle->dev->ctx,
-                [&deviceInfo]()
                 {
-                    return UsbDevice::FromIdAsync(deviceInfo.Id());
+                    dev_handle->dev->ctx,
+                    [&deviceInfo]()
+                    {
+                        return UsbDevice::FromIdAsync(deviceInfo.Id());
+                    }
                 }
             );
         }
@@ -986,101 +1081,33 @@ static int winrt_set_interface_altsetting(libusb_device_handle *dev_handle, uint
 
 static int winrt_clear_halt(libusb_device_handle *dev_handle, unsigned char endpoint)
 {
-    winrt_device_handle_priv *handle_priv = static_cast<winrt_device_handle_priv*>(usbi_get_device_handle_priv(dev_handle));
+    winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(dev_handle->dev));
 
-    winrt::Windows::Foundation::AsyncStatus status = winrt::Windows::Foundation::AsyncStatus::Started;
-
-    for (std::pair<const uint8_t, winrt_interface>& itf : handle_priv->interfaces)
+    if (!priv->default_device.device)
     {
-        for (std::pair<const uint8_t, winrt::Windows::Devices::Usb::UsbBulkInPipe>& eps : itf.second.bulk_in_pipes)
-        {
-            if (eps.first == endpoint)
-            {
-                status = winrt_handle_async_action(
-                    dev_handle->dev->ctx,
-                    [&]()
-                    {
-                        return eps.second.ClearStallAsync();
-                    }
-                );
-
-                break;
-            }
-        }
-
-        for (std::pair<const uint8_t, winrt::Windows::Devices::Usb::UsbBulkOutPipe>& eps : itf.second.bulk_out_pipes)
-        {
-            if (eps.first == endpoint)
-            {
-                status = winrt_handle_async_action(
-                    dev_handle->dev->ctx,
-                    [&]()
-                    {
-                        return eps.second.ClearStallAsync();
-                    }
-                );
-
-                break;
-            }
-        }
-
-        for (std::pair<const uint8_t, winrt::Windows::Devices::Usb::UsbInterruptInPipe>& eps : itf.second.interrupt_in_pipes)
-        {
-            if (eps.first == endpoint)
-            {
-                status = winrt_handle_async_action(
-                    dev_handle->dev->ctx,
-                    [&]()
-                    {
-                        return eps.second.ClearStallAsync();
-                    }
-                );
-
-                break;
-            }
-        }
-
-        for (std::pair<const uint8_t, winrt::Windows::Devices::Usb::UsbInterruptOutPipe>& eps : itf.second.interrupt_out_pipes)
-        {
-            if (eps.first == endpoint)
-            {
-                status = winrt_handle_async_action(
-                    dev_handle->dev->ctx,
-                    [&]()
-                    {
-                        return eps.second.ClearStallAsync();
-                    }
-                );
-
-                break;
-            }
-        }
+        return LIBUSB_ERROR_NO_DEVICE;
     }
 
-    if (status == winrt::Windows::Foundation::AsyncStatus::Started)
+    // It's easiest to just do a control transfer rather than try to use winrt objects
+    auto setupPacket = UsbSetupPacket();
+    setupPacket.RequestType().Direction(UsbTransferDirection::Out);
+    setupPacket.RequestType().ControlTransferType(UsbControlTransferType::Standard);
+    setupPacket.RequestType().Recipient(UsbControlRecipient::Endpoint);
+    setupPacket.Request(LIBUSB_REQUEST_CLEAR_FEATURE);
+    setupPacket.Value(0); // feature for ENDPOINT_HALT
+    setupPacket.Index(endpoint);
+    setupPacket.Length(0);
+
+    int r = winrt_send_control_transfer_out(dev_handle->dev->ctx, priv->default_device.device, setupPacket);
+
+    if (r != LIBUSB_SUCCESS)
     {
-        return LIBUSB_ERROR_NOT_FOUND;
-    }
-    if (status == winrt::Windows::Foundation::AsyncStatus::Canceled)
-    {
-        usbi_warn(
-            dev_handle->dev->ctx,
-            "Timeout occurred while trying to clear stall for endpoint %i",
-            static_cast<int>(endpoint)
-        );
-        return LIBUSB_ERROR_TIMEOUT;
-    }
-    else if (status != winrt::Windows::Foundation::AsyncStatus::Completed)
-    {
-        usbi_warn(
-            dev_handle->dev->ctx,
-            "Error occurred while trying to clear stall for endpoint %i",
-            static_cast<int>(endpoint)
-        );
-        return LIBUSB_ERROR_IO;
+        usbi_warn(dev_handle->dev->ctx, "Failed to clear stall on endpoint 0 (%s)", libusb_error_name(r));
+        return r;
     }
 
     return LIBUSB_SUCCESS;
+
 }
 
 static int winrt_reset_device(libusb_device_handle *dev_handle)
@@ -1097,10 +1124,12 @@ static int winrt_reset_device(libusb_device_handle *dev_handle)
         for (std::pair<const uint8_t, winrt::Windows::Devices::Usb::UsbBulkOutPipe>& eps : itf.second.bulk_out_pipes)
         {
             winrt_handle_async<bool>(
-                dev_handle->dev->ctx,
-                [&]()
                 {
-                    return eps.second.OutputStream().FlushAsync();
+                    dev_handle->dev->ctx,
+                    [&]()
+                    {
+                        return eps.second.OutputStream().FlushAsync();
+                    }
                 }
             );
         }
@@ -1108,10 +1137,12 @@ static int winrt_reset_device(libusb_device_handle *dev_handle)
         for (std::pair<const uint8_t, winrt::Windows::Devices::Usb::UsbInterruptOutPipe>& eps : itf.second.interrupt_out_pipes)
         {
             winrt_handle_async<bool>(
-                dev_handle->dev->ctx,
-                [&]()
                 {
-                    return eps.second.OutputStream().FlushAsync();
+                    dev_handle->dev->ctx,
+                    [&]()
+                    {
+                        return eps.second.OutputStream().FlushAsync();
+                    }
                 }
             );
         }
@@ -1132,24 +1163,6 @@ static void winrt_destroy_device(libusb_device *dev)
     }
     // Manually call destructor
     priv->~winrt_device_priv();
-}
-
-static libusb_transfer_status winrt_get_transfer_error(usbi_transfer *itransfer)
-{
-    winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(itransfer->dev));
-    int r = winrt_is_device_connected(itransfer->dev->ctx, priv->default_device.device_path);
-    if (r == LIBUSB_SUCCESS)
-    {
-        return LIBUSB_TRANSFER_STALL;
-    }
-    else if (r == LIBUSB_ERROR_NO_DEVICE)
-    {
-        return LIBUSB_TRANSFER_NO_DEVICE;
-    }
-    else
-    {
-        return LIBUSB_TRANSFER_ERROR;
-    }
 }
 
 static int winrt_submit_control_transfer(usbi_transfer *itransfer)
@@ -1185,7 +1198,15 @@ static int winrt_submit_control_transfer(usbi_transfer *itransfer)
                 "Exception occurred while trying to submit an IN control transfer: %s",
                 e.message().c_str()
             );
-            return LIBUSB_ERROR_IO;
+
+            if (e.code().value == ERROR_BAD_COMMAND)
+            {
+                return LIBUSB_ERROR_NO_DEVICE;
+            }
+            else
+            {
+                return LIBUSB_ERROR_IO;
+            }
         }
 
         // This is capturing by value to keep the reference back to async operation
@@ -1209,7 +1230,8 @@ static int winrt_submit_control_transfer(usbi_transfer *itransfer)
             }
             else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Error)
             {
-                status = winrt_get_transfer_error(itransfer);
+                // Assume stall
+                status = LIBUSB_TRANSFER_STALL;
             }
             else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Canceled)
             {
@@ -1238,7 +1260,15 @@ static int winrt_submit_control_transfer(usbi_transfer *itransfer)
                 "Exception occurred while trying to submit an OUT control transfer: %s",
                 e.message().c_str()
             );
-            return LIBUSB_ERROR_IO;
+
+            if (e.code().value == ERROR_BAD_COMMAND)
+            {
+                return LIBUSB_ERROR_NO_DEVICE;
+            }
+            else
+            {
+                return LIBUSB_ERROR_IO;
+            }
         }
 
         // This is capturing by value to keep the reference back to async operation
@@ -1258,7 +1288,8 @@ static int winrt_submit_control_transfer(usbi_transfer *itransfer)
             }
             else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Error)
             {
-                status = winrt_get_transfer_error(itransfer);
+                // Assume stall
+                status = LIBUSB_TRANSFER_STALL;
             }
             else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Canceled)
             {
@@ -1308,13 +1339,21 @@ static int winrt_submit_bulk_transfer(usbi_transfer *itransfer)
                             "Exception occurred while trying to submit an IN bulk transfer: %s",
                             e.message().c_str()
                         );
-                        return LIBUSB_ERROR_IO;
+
+                        if (e.code().value == ERROR_BAD_COMMAND)
+                        {
+                            return LIBUSB_ERROR_NO_DEVICE;
+                        }
+                        else
+                        {
+                            return LIBUSB_ERROR_IO;
+                        }
                     }
 
                     // This is capturing by value to keep the reference back to async operation
                     tpriv->cancel_fn = [asyncOp](){asyncOp.Cancel();};
 
-                    asyncOp.Completed([&dev=itf.second.device, itransfer](auto const& sender, auto const& args) {
+                    asyncOp.Completed([itransfer](auto const& sender, auto const& args) {
                         libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
                         libusb_transfer_status status = LIBUSB_TRANSFER_ERROR;
                         if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Completed)
@@ -1333,7 +1372,8 @@ static int winrt_submit_bulk_transfer(usbi_transfer *itransfer)
                         }
                         else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Error)
                         {
-                            status = winrt_get_transfer_error(itransfer);
+                            // Assume stall
+                            status = LIBUSB_TRANSFER_STALL;
                         }
                         else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Canceled)
                         {
@@ -1374,7 +1414,15 @@ static int winrt_submit_bulk_transfer(usbi_transfer *itransfer)
                             "Exception occurred while trying to submit an OUT bulk transfer: %s",
                             e.message().c_str()
                         );
-                        return LIBUSB_ERROR_IO;
+
+                        if (e.code().value == ERROR_BAD_COMMAND)
+                        {
+                            return LIBUSB_ERROR_NO_DEVICE;
+                        }
+                        else
+                        {
+                            return LIBUSB_ERROR_IO;
+                        }
                     }
 
                     // This is capturing by value to keep the reference back to async operation
@@ -1394,7 +1442,8 @@ static int winrt_submit_bulk_transfer(usbi_transfer *itransfer)
                         }
                         else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Error)
                         {
-                            status = winrt_get_transfer_error(itransfer);
+                            // Assume stall
+                            status = LIBUSB_TRANSFER_STALL;
                         }
                         else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Canceled)
                         {
@@ -1466,7 +1515,15 @@ static int winrt_submit_interrupt_transfer(usbi_transfer *itransfer)
                             "Exception occurred while trying to submit an IN interrupt transfer: %s",
                             e.message().c_str()
                         );
-                        return LIBUSB_ERROR_IO;
+
+                        if (e.code().value == ERROR_BAD_COMMAND)
+                        {
+                            return LIBUSB_ERROR_NO_DEVICE;
+                        }
+                        else
+                        {
+                            return LIBUSB_ERROR_IO;
+                        }
                     }
 
                     tpriv->cancel_fn = [itransfer, pipe = eps.second](){
@@ -1505,7 +1562,15 @@ static int winrt_submit_interrupt_transfer(usbi_transfer *itransfer)
                             "Exception occurred while trying to submit an OUT interrupt transfer: %s",
                             e.message().c_str()
                         );
-                        return LIBUSB_ERROR_IO;
+
+                        if (e.code().value == ERROR_BAD_COMMAND)
+                        {
+                            return LIBUSB_ERROR_NO_DEVICE;
+                        }
+                        else
+                        {
+                            return LIBUSB_ERROR_IO;
+                        }
                     }
 
                     // This is capturing by value to keep the reference back to async operation
@@ -1525,7 +1590,8 @@ static int winrt_submit_interrupt_transfer(usbi_transfer *itransfer)
                         }
                         else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Error)
                         {
-                            status = winrt_get_transfer_error(itransfer);
+                            // Assume stall
+                            status = LIBUSB_TRANSFER_STALL;
                         }
                         else if (sender.Status() == winrt::Windows::Foundation::AsyncStatus::Canceled)
                         {
@@ -1689,25 +1755,29 @@ static int winrt_pop_transfer_from_queue(usbi_transfer *itransfer, winrt_transfe
                     break;
             }
 
-            if (transferStatus != LIBUSB_SUCCESS)
+            if (transferStatus == LIBUSB_ERROR_NO_DEVICE)
             {
-                winrt_transfer_priv *tpriv = static_cast<winrt_transfer_priv*>(usbi_get_transfer_priv(itransfer));
-                tpriv->status = libusb_transfer_status::LIBUSB_TRANSFER_ERROR;
+                tpriv = static_cast<winrt_transfer_priv*>(usbi_get_transfer_priv(itransfer));
+                tpriv->status = libusb_transfer_status::LIBUSB_TRANSFER_NO_DEVICE;
                 usbi_signal_transfer_completion(itransfer);
 
-                if (transferStatus == LIBUSB_ERROR_NO_DEVICE)
+                // Cancel everything else in the queue because there is no device detected
+                while (!queue.transfer_queue.empty())
                 {
-                    // Cancel everything because there is no device detected
-                    while (!queue.transfer_queue.empty())
-                    {
-                        itransfer = queue.transfer_queue.front();
-                        queue.transfer_queue.pop_front();
-                        winrt_transfer_priv *tpriv = static_cast<winrt_transfer_priv*>(usbi_get_transfer_priv(itransfer));
-                        tpriv->status = libusb_transfer_status::LIBUSB_TRANSFER_ERROR;
-                        usbi_signal_transfer_completion(itransfer);
-                    }
-                    return transferStatus;
+                    itransfer = queue.transfer_queue.front();
+                    queue.transfer_queue.pop_front();
+                    tpriv = static_cast<winrt_transfer_priv*>(usbi_get_transfer_priv(itransfer));
+                    tpriv->status = libusb_transfer_status::LIBUSB_TRANSFER_NO_DEVICE;
+                    usbi_signal_transfer_completion(itransfer);
                 }
+                return transferStatus;
+            }
+            else if (transferStatus != LIBUSB_SUCCESS)
+            {
+                // Other error: just complete this transfer and try the next one
+                tpriv = static_cast<winrt_transfer_priv*>(usbi_get_transfer_priv(itransfer));
+                tpriv->status = libusb_transfer_status::LIBUSB_TRANSFER_ERROR;
+                usbi_signal_transfer_completion(itransfer);
             }
         } while (transferStatus != LIBUSB_SUCCESS && !queue.transfer_queue.empty());
 
