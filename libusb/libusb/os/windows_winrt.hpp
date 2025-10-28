@@ -51,35 +51,38 @@ struct winrt_transfer_queue
     usbi_transfer* active_transfer;
     //! Queue of transfers waiting to be processed
     std::list<usbi_transfer*> transfer_queue;
-    //! Mutex serializing access to the above transfer data
-    std::mutex transfer_mutex;
+};
+
+struct winrt_device_data
+{
+    //! Access to a USB device and an interface of the device
+    winrt::Windows::Devices::Usb::UsbDevice device = nullptr;
+    //! The device ID used to open the above device
+    std::wstring device_id;
+    // The device instance ID AKA device path of the device
+    std::wstring device_path;
 };
 
 struct winrt_device_priv
 {
     //! The active configuration (0 if not retrieved yet)
     uint8_t active_config = 0;
-
     //! Stores each configuration descriptor (only filled once any descriptor is requested)
     std::vector<std::vector<uint8_t>> config_descriptors;
-
     //! String representation of System.Devices.ContainerId for this device
     std::wstring container_id;
     //! Because of the way winrt is setup, a UsbDevice must be claimed to perform any operation like control transfers
-    winrt::Windows::Devices::Usb::UsbDevice default_device = nullptr;
-    //! The ID of the default device
-    std::wstring default_device_id;
-
+    winrt_device_data default_device;
     //! Keeps track of all current control transfers
     winrt_transfer_queue control_transfers;
+    //! Mutex serializing access to transfer queues
+    std::mutex transfer_mutex;
 };
 
 struct winrt_interface
 {
     //! The device that this interface is associated with
-    winrt::Windows::Devices::Usb::UsbDevice device;
-    //! The device ID used to open the above device
-    std::wstring device_id;
+    winrt_device_data device;
     //! Maps endpoint number to bulk input pipe
     std::unordered_map<uint8_t, winrt::Windows::Devices::Usb::UsbBulkInPipe> bulk_in_pipes;
     //! Maps endpoint number to bulk output pipe
