@@ -2782,7 +2782,7 @@ out:
 	return (const struct libusb_pollfd **)ret;
 #else
 	usbi_err(ctx, "external polling of libusb's internal event sources " \
-		"is not yet supported on this platform");
+		"is not yet supported on Windows");
 	return NULL;
 #endif
 }
