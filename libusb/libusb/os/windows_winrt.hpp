@@ -76,7 +76,7 @@ struct winrt_device_priv
     //! Keeps track of all current control transfers
     winrt_transfer_queue control_transfers;
     //! Mutex serializing access to transfer queues
-    std::mutex transfer_mutex;
+    std::recursive_mutex transfer_mutex;
 };
 
 struct winrt_interface
