@@ -107,6 +107,10 @@ struct winrt_transfer_priv
     libusb_transfer_status status = LIBUSB_TRANSFER_ERROR;
     //! The function to call in order to cancel the asynchronous communication operation
     std::function<void()> cancel_fn;
+
+    // TODO: remove the following two attributes
+    std::function<void(winrt::Windows::Devices::Usb::UsbInterruptInPipe pipe, winrt::Windows::Devices::Usb::UsbInterruptInEventArgs args)> cb;
+    winrt::event_token cb_token;
 };
 
 #endif // LIBUSB_WINDOWS_WINRT_H

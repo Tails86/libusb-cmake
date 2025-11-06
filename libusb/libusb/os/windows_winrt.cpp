@@ -1460,28 +1460,25 @@ static int winrt_submit_interrupt_transfer(usbi_transfer *itransfer)
                     try
                     {
                         // TODO: I believe this should be a static callback for the life of the device
-                        eps.second.DataReceived(
+                        tpriv->cb_token = eps.second.DataReceived(
                             [itransfer](winrt::Windows::Devices::Usb::UsbInterruptInPipe pipe, winrt::Windows::Devices::Usb::UsbInterruptInEventArgs args)
                             {
-                                // Set new callback as quickly as possible
-                                pipe.DataReceived(winrt::event_token{});
+                                winrt_transfer_priv *tpriv = static_cast<winrt_transfer_priv*>(usbi_get_transfer_priv(itransfer));
+                                // Remove the callback using the stored token to avoid multiple calls
+                                pipe.DataReceived(tpriv->cb_token);
+
                                 libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
                                 libusb_transfer_status status = LIBUSB_TRANSFER_ERROR;
                                 if (args.InterruptData() && args.InterruptData().Length() <= transfer->length)
                                 {
                                     status = LIBUSB_TRANSFER_COMPLETED;
-                                }
-                                winrt_transfer_completed(itransfer, status, false); // *no signal
-
-                                // Parse data
-                                if (status == LIBUSB_TRANSFER_COMPLETED)
-                                {
+                                    // Parse data before completing transfer
                                     auto dataReader = Streams::DataReader::FromBuffer(args.InterruptData());
                                     dataReader.ReadBytes(winrt::array_view<uint8_t>(transfer->buffer, args.InterruptData().Length()));
                                     itransfer->transferred = args.InterruptData().Length();
                                 }
 
-                                usbi_signal_transfer_completion(itransfer);
+                                winrt_transfer_completed(itransfer, status);
                             }
                         );
                     }
@@ -1496,8 +1493,9 @@ static int winrt_submit_interrupt_transfer(usbi_transfer *itransfer)
                         return LIBUSB_ERROR_NO_DEVICE;
                     }
 
-                    tpriv->cancel_fn = [itransfer, pipe = eps.second](){
-                        pipe.DataReceived(winrt::event_token{});
+                    tpriv->cancel_fn = [itransfer, pipe=eps.second](){
+                        winrt_transfer_priv *tpriv = static_cast<winrt_transfer_priv*>(usbi_get_transfer_priv(itransfer));
+                        pipe.DataReceived(tpriv->cb_token);
                         winrt_transfer_completed(itransfer, LIBUSB_TRANSFER_CANCELLED);
                     };
 
