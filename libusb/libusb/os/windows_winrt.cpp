@@ -610,10 +610,15 @@ static int winrt_open(libusb_device_handle *dev_handle)
     return commFail ? LIBUSB_ERROR_IO : LIBUSB_ERROR_BUSY;
 }
 
+static int winrt_release_interface(libusb_device_handle *dev_handle, uint8_t iface);
+
 static void winrt_close(libusb_device_handle *dev_handle)
 {
     winrt_device_handle_priv *handle_priv = static_cast<winrt_device_handle_priv*>(usbi_get_device_handle_priv(dev_handle));
-    handle_priv->interfaces.clear();
+    while (!handle_priv->interfaces.empty())
+    {
+        winrt_release_interface(dev_handle, handle_priv->interfaces.begin()->first);
+    }
     // Manually call destructor
     handle_priv->~winrt_device_handle_priv();
 }
@@ -944,7 +949,68 @@ static int winrt_claim_interface(libusb_device_handle *dev_handle, uint8_t iface
             }
             for (auto& intEpIn: winrtDev.DefaultInterface().InterruptInPipes())
             {
-                itfDef.interrupt_in_pipes.insert_or_assign(intEpIn.EndpointDescriptor().EndpointNumber() | LIBUSB_ENDPOINT_IN, std::move(intEpIn));
+                const uint8_t epNum = intEpIn.EndpointDescriptor().EndpointNumber() | LIBUSB_ENDPOINT_IN;
+
+                auto insertStatus = itfDef.interrupt_in_pipes.insert(std::make_pair(epNum, std::move(winrt_interrupt_in_data{std::move(intEpIn)})));
+
+                if (insertStatus.second)
+                {
+                    winrt_transfer_queue* queuePtr = nullptr;
+
+                    {
+                        std::lock_guard<std::recursive_mutex> lock(priv->transfer_mutex);
+
+                        auto iter = handle_priv->transfers.find(epNum);
+                        if (iter == handle_priv->transfers.end())
+                        {
+                            iter = handle_priv->transfers.insert(std::make_pair(epNum, winrt_transfer_queue{})).first;
+                        }
+                        queuePtr = &iter->second;
+                    }
+
+                    winrt_interrupt_in_data *inData = &insertStatus.first->second;
+                    inData->cb =
+                        [queuePtr, &transfer_mutex = priv->transfer_mutex]
+                        (
+                            winrt::Windows::Devices::Usb::UsbInterruptInPipe pipe,
+                            winrt::Windows::Devices::Usb::UsbInterruptInEventArgs args
+                        )
+                        {
+                            std::lock_guard<std::recursive_mutex> lock(transfer_mutex);
+                            if (queuePtr->active_transfer)
+                            {
+                                usbi_transfer* itransfer = queuePtr->active_transfer;
+
+                                libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
+                                libusb_transfer_status status = LIBUSB_TRANSFER_ERROR;
+                                if (args.InterruptData() && args.InterruptData().Length() <= transfer->length)
+                                {
+                                    status = LIBUSB_TRANSFER_COMPLETED;
+                                    // Parse data before completing transfer
+                                    auto dataReader = Streams::DataReader::FromBuffer(args.InterruptData());
+                                    dataReader.ReadBytes(winrt::array_view<uint8_t>(transfer->buffer, args.InterruptData().Length()));
+                                    itransfer->transferred = args.InterruptData().Length();
+                                }
+
+                                winrt_transfer_completed(itransfer, status);
+                            }
+                        };
+
+                    try
+                    {
+                        inData->cb_token = inData->pipe.DataReceived(inData->cb);
+                    }
+                    catch (const winrt::hresult_error& e)
+                    {
+                        usbi_err(
+                            dev_handle->dev->ctx,
+                            "Exception occurred while trying to set IN interrupt callback: %s",
+                            e.message().c_str()
+                        );
+
+                        return LIBUSB_ERROR_NO_DEVICE;
+                    }
+                }
             }
             for (auto& intEpOut: winrtDev.DefaultInterface().InterruptOutPipes())
             {
@@ -988,6 +1054,16 @@ static int winrt_release_interface(libusb_device_handle *dev_handle, uint8_t ifa
     if (iter != handle_priv->interfaces.end())
     {
         bool updateDefaultDevice = (iter->second.device.device == priv->default_device.device);
+
+        for (auto& inDataPair : iter->second.interrupt_in_pipes)
+        {
+            winrt_interrupt_in_data& inData = inDataPair.second;
+            if (inData.cb_token)
+            {
+                // Clear the callback
+                inData.pipe.DataReceived(inData.cb_token);
+            }
+        }
 
         handle_priv->interfaces.erase(iter);
 
@@ -1453,49 +1529,12 @@ static int winrt_submit_interrupt_transfer(usbi_transfer *itransfer)
 
         for (std::pair<const uint8_t, winrt_interface>& itf : handle_priv->interfaces)
         {
-            for (std::pair<const uint8_t, winrt::Windows::Devices::Usb::UsbInterruptInPipe>& eps : itf.second.interrupt_in_pipes)
+            for (std::pair<const uint8_t, winrt_interrupt_in_data>& eps : itf.second.interrupt_in_pipes)
             {
                 if (eps.first == transfer->endpoint)
                 {
-                    try
-                    {
-                        // TODO: I believe this should be a static callback for the life of the device
-                        tpriv->cb_token = eps.second.DataReceived(
-                            [itransfer](winrt::Windows::Devices::Usb::UsbInterruptInPipe pipe, winrt::Windows::Devices::Usb::UsbInterruptInEventArgs args)
-                            {
-                                winrt_transfer_priv *tpriv = static_cast<winrt_transfer_priv*>(usbi_get_transfer_priv(itransfer));
-                                // Remove the callback using the stored token to avoid multiple calls
-                                pipe.DataReceived(tpriv->cb_token);
-
-                                libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
-                                libusb_transfer_status status = LIBUSB_TRANSFER_ERROR;
-                                if (args.InterruptData() && args.InterruptData().Length() <= transfer->length)
-                                {
-                                    status = LIBUSB_TRANSFER_COMPLETED;
-                                    // Parse data before completing transfer
-                                    auto dataReader = Streams::DataReader::FromBuffer(args.InterruptData());
-                                    dataReader.ReadBytes(winrt::array_view<uint8_t>(transfer->buffer, args.InterruptData().Length()));
-                                    itransfer->transferred = args.InterruptData().Length();
-                                }
-
-                                winrt_transfer_completed(itransfer, status);
-                            }
-                        );
-                    }
-                    catch (const winrt::hresult_error& e)
-                    {
-                        usbi_err(
-                            itransfer->dev->ctx,
-                            "Exception occurred while trying to submit an IN interrupt transfer: %s",
-                            e.message().c_str()
-                        );
-
-                        return LIBUSB_ERROR_NO_DEVICE;
-                    }
-
-                    tpriv->cancel_fn = [itransfer, pipe=eps.second](){
-                        winrt_transfer_priv *tpriv = static_cast<winrt_transfer_priv*>(usbi_get_transfer_priv(itransfer));
-                        pipe.DataReceived(tpriv->cb_token);
+                    // All that needs to be done is set the cancel callback since this is handled automatically
+                    tpriv->cancel_fn = [itransfer](){
                         winrt_transfer_completed(itransfer, LIBUSB_TRANSFER_CANCELLED);
                     };
 
