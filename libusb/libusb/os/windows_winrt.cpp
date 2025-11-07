@@ -1667,9 +1667,10 @@ static int winrt_submit_transfer(usbi_transfer *itransfer)
         }
         break;
 
+        case LIBUSB_TRANSFER_TYPE_ISOCHRONOUS: // Fall through
         case LIBUSB_TRANSFER_TYPE_BULK: // Fall through
-        case LIBUSB_TRANSFER_TYPE_BULK_STREAM: // Fall through
-        case LIBUSB_TRANSFER_TYPE_INTERRUPT:
+        case LIBUSB_TRANSFER_TYPE_INTERRUPT: // Fall through
+        case LIBUSB_TRANSFER_TYPE_BULK_STREAM:
         {
             std::lock_guard<std::recursive_mutex> lock(priv->transfer_mutex);
 
@@ -1692,7 +1693,7 @@ static int winrt_submit_transfer(usbi_transfer *itransfer)
                 handle_priv->transfers[transfer->endpoint].active_transfer = itransfer;
             }
 
-            if (transfer->type == LIBUSB_TRANSFER_TYPE_INTERRUPT)
+            if (transfer->type == LIBUSB_TRANSFER_TYPE_ISOCHRONOUS || transfer->type == LIBUSB_TRANSFER_TYPE_INTERRUPT)
             {
                 transferStatus = winrt_submit_interrupt_transfer(itransfer);
             }
@@ -1702,11 +1703,6 @@ static int winrt_submit_transfer(usbi_transfer *itransfer)
             }
         }
         break;
-
-        case LIBUSB_TRANSFER_TYPE_ISOCHRONOUS:
-            // TODO: I wonder if winrt just labels isochronous pipes as interrupt
-            usbi_err(TRANSFER_CTX(transfer), "ISOCHRONOUS transfer type not supported by winrt");
-            transferStatus = LIBUSB_ERROR_NOT_SUPPORTED;
 
         default:
             // Should not get here since windows_submit_transfer() validates
@@ -1761,13 +1757,9 @@ static int winrt_pop_transfer_from_queue(usbi_transfer *itransfer, winrt_transfe
                     transferStatus = winrt_submit_bulk_transfer(itransfer);
                     break;
 
+                case LIBUSB_TRANSFER_TYPE_ISOCHRONOUS: // Fall through
                 case LIBUSB_TRANSFER_TYPE_INTERRUPT:
                     transferStatus = winrt_submit_interrupt_transfer(itransfer);
-                    break;
-
-                case LIBUSB_TRANSFER_TYPE_ISOCHRONOUS:
-                    usbi_err(TRANSFER_CTX(transfer), "ISOCHRONOUS transfer type not supported by winrt");
-                    transferStatus = LIBUSB_ERROR_NOT_SUPPORTED;
                     break;
 
                 default:
