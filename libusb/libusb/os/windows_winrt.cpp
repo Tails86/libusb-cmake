@@ -615,6 +615,7 @@ static int winrt_release_interface(libusb_device_handle *dev_handle, uint8_t ifa
 static void winrt_close(libusb_device_handle *dev_handle)
 {
     winrt_device_handle_priv *handle_priv = static_cast<winrt_device_handle_priv*>(usbi_get_device_handle_priv(dev_handle));
+    // Ensure that interface objects are properly released
     while (!handle_priv->interfaces.empty())
     {
         winrt_release_interface(dev_handle, handle_priv->interfaces.begin()->first);
@@ -844,6 +845,50 @@ static int winrt_set_configuration(libusb_device_handle *dev_handle, int config)
 	return LIBUSB_SUCCESS;
 }
 
+static void winrt_handle_interrupt(
+    libusb_device_handle *dev_handle,
+    uint8_t epNum,
+    winrt::Windows::Storage::Streams::IBuffer data
+)
+{
+    winrt_device_handle_priv *handle_priv = static_cast<winrt_device_handle_priv*>(usbi_get_device_handle_priv(dev_handle));
+    winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(dev_handle->dev));
+
+    // Lock this function with the transfer mutex
+    std::lock_guard<std::recursive_mutex> lock(priv->transfer_mutex);
+
+    // Find the queue this data is destined for
+    winrt_transfer_queue* queuePtr = nullptr;
+    auto iter = handle_priv->transfers.find(epNum);
+    if (iter != handle_priv->transfers.end())
+    {
+        queuePtr = &iter->second;
+    }
+
+    // If there is an active transfer, load this data into it
+    if (queuePtr && queuePtr->active_transfer)
+    {
+        usbi_transfer* itransfer = queuePtr->active_transfer;
+
+        libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
+        libusb_transfer_status status = LIBUSB_TRANSFER_ERROR;
+        if (data)
+        {
+            status = LIBUSB_TRANSFER_COMPLETED;
+            auto dataReader = Streams::DataReader::FromBuffer(data);
+            std::size_t len = data.Length();
+            if (len > transfer->length)
+            {
+                len = transfer->length;
+            }
+            dataReader.ReadBytes(winrt::array_view<uint8_t>(transfer->buffer, len));
+            itransfer->transferred = data.Length();
+        }
+
+        winrt_transfer_completed(itransfer, status);
+    }
+}
+
 static int winrt_claim_interface(libusb_device_handle *dev_handle, uint8_t iface)
 {
     winrt_device_handle_priv *handle_priv = static_cast<winrt_device_handle_priv*>(usbi_get_device_handle_priv(dev_handle));
@@ -939,61 +984,36 @@ static int winrt_claim_interface(libusb_device_handle *dev_handle, uint8_t iface
         {
             std::wstring path(deviceInfo.Properties().Lookup(L"System.Devices.DeviceInstanceId").as<hstring>());
             winrt_interface itfDef{winrt_device_data{winrtDev, id, path}};
+
             for (auto& bulkEpIn: winrtDev.DefaultInterface().BulkInPipes())
             {
                 itfDef.bulk_in_pipes.insert_or_assign(bulkEpIn.EndpointDescriptor().EndpointNumber() | LIBUSB_ENDPOINT_IN, std::move(bulkEpIn));
             }
+
             for (auto& bulkEpOut: winrtDev.DefaultInterface().BulkOutPipes())
             {
                 itfDef.bulk_out_pipes.insert_or_assign(bulkEpOut.EndpointDescriptor().EndpointNumber(), std::move(bulkEpOut));
             }
+
             for (auto& intEpIn: winrtDev.DefaultInterface().InterruptInPipes())
             {
                 const uint8_t epNum = intEpIn.EndpointDescriptor().EndpointNumber() | LIBUSB_ENDPOINT_IN;
 
+                // Insert new interrupt data for this endpoint
                 auto insertStatus = itfDef.interrupt_in_pipes.insert(std::make_pair(epNum, std::move(winrt_interrupt_in_data{std::move(intEpIn)})));
 
+                // If a new insert took place, fill in the interrupt data
                 if (insertStatus.second)
                 {
-                    winrt_transfer_queue* queuePtr = nullptr;
-
-                    {
-                        std::lock_guard<std::recursive_mutex> lock(priv->transfer_mutex);
-
-                        auto iter = handle_priv->transfers.find(epNum);
-                        if (iter == handle_priv->transfers.end())
-                        {
-                            iter = handle_priv->transfers.insert(std::make_pair(epNum, winrt_transfer_queue{})).first;
-                        }
-                        queuePtr = &iter->second;
-                    }
-
                     winrt_interrupt_in_data *inData = &insertStatus.first->second;
                     inData->cb =
-                        [queuePtr, &transfer_mutex = priv->transfer_mutex]
+                        [dev_handle, epNum]
                         (
                             winrt::Windows::Devices::Usb::UsbInterruptInPipe pipe,
                             winrt::Windows::Devices::Usb::UsbInterruptInEventArgs args
                         )
                         {
-                            std::lock_guard<std::recursive_mutex> lock(transfer_mutex);
-                            if (queuePtr->active_transfer)
-                            {
-                                usbi_transfer* itransfer = queuePtr->active_transfer;
-
-                                libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
-                                libusb_transfer_status status = LIBUSB_TRANSFER_ERROR;
-                                if (args.InterruptData() && args.InterruptData().Length() <= transfer->length)
-                                {
-                                    status = LIBUSB_TRANSFER_COMPLETED;
-                                    // Parse data before completing transfer
-                                    auto dataReader = Streams::DataReader::FromBuffer(args.InterruptData());
-                                    dataReader.ReadBytes(winrt::array_view<uint8_t>(transfer->buffer, args.InterruptData().Length()));
-                                    itransfer->transferred = args.InterruptData().Length();
-                                }
-
-                                winrt_transfer_completed(itransfer, status);
-                            }
+                            winrt_handle_interrupt(dev_handle, epNum, args.InterruptData());
                         };
 
                     try
@@ -1012,6 +1032,7 @@ static int winrt_claim_interface(libusb_device_handle *dev_handle, uint8_t iface
                     }
                 }
             }
+
             for (auto& intEpOut: winrtDev.DefaultInterface().InterruptOutPipes())
             {
                 itfDef.interrupt_out_pipes.insert_or_assign(intEpOut.EndpointDescriptor().EndpointNumber(), std::move(intEpOut));
@@ -1627,7 +1648,6 @@ static int winrt_submit_transfer(usbi_transfer *itransfer)
 
     int transferStatus = LIBUSB_ERROR_OTHER;
 
-    // Only handling control transfers for now
     switch (transfer->type)
     {
         case LIBUSB_TRANSFER_TYPE_CONTROL:
@@ -1796,6 +1816,7 @@ static int winrt_pop_transfer(usbi_transfer *itransfer)
     int r = winrt_pop_transfer_from_queue(itransfer, priv->control_transfers);
     if (r != LIBUSB_ERROR_NOT_FOUND)
     {
+        // TODO: if active_transfer is empty, see if default_device should be changed
         return r;
     }
 
