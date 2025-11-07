@@ -1808,7 +1808,6 @@ static int winrt_pop_transfer(usbi_transfer *itransfer)
     int r = winrt_pop_transfer_from_queue(itransfer, priv->control_transfers);
     if (r != LIBUSB_ERROR_NOT_FOUND)
     {
-        // TODO: if active_transfer is empty, see if default_device should be changed
         return r;
     }
 
