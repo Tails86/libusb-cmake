@@ -822,7 +822,7 @@ static int winrt_set_configuration(libusb_device_handle *dev_handle, int config)
         return LIBUSB_ERROR_NO_DEVICE;
     }
 
-    // Get the active configuration number
+    // Set the active configuration number
     auto setupPacket = UsbSetupPacket();
     setupPacket.RequestType().Direction(UsbTransferDirection::Out);
     setupPacket.RequestType().ControlTransferType(UsbControlTransferType::Standard);
@@ -1065,12 +1065,6 @@ static int winrt_release_interface(libusb_device_handle *dev_handle, uint8_t ifa
     winrt_device_handle_priv *handle_priv = static_cast<winrt_device_handle_priv*>(usbi_get_device_handle_priv(dev_handle));
     winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(dev_handle->dev));
 
-    // For any communication, the default_device must be set
-    if (!priv->default_device.device)
-    {
-        return LIBUSB_ERROR_NO_DEVICE;
-    }
-
     auto iter = handle_priv->interfaces.find(iface);
     if (iter != handle_priv->interfaces.end())
     {
@@ -1086,6 +1080,7 @@ static int winrt_release_interface(libusb_device_handle *dev_handle, uint8_t ifa
             }
         }
 
+        // Remove this interface
         handle_priv->interfaces.erase(iter);
 
         if (updateDefaultDevice)
@@ -1106,22 +1101,26 @@ static int winrt_release_interface(libusb_device_handle *dev_handle, uint8_t ifa
                 }
             }
         }
+
+        return LIBUSB_SUCCESS;
     }
 
-    return LIBUSB_SUCCESS;
+    return LIBUSB_ERROR_NOT_FOUND;
 }
 
 static int winrt_set_interface_altsetting(libusb_device_handle *dev_handle, uint8_t iface, uint8_t altsetting)
 {
     winrt_device_priv *priv = static_cast<winrt_device_priv*>(usbi_get_device_priv(dev_handle->dev));
 
+    if (!priv->default_device.device)
+    {
+        return LIBUSB_ERROR_NO_DEVICE;
+    }
+
+    const bool reclaim = (winrt_release_interface(dev_handle, iface) == LIBUSB_SUCCESS);
+
     try
     {
-        if (!priv->default_device.device)
-        {
-            return LIBUSB_ERROR_NO_DEVICE;
-        }
-
         for (auto& itf : priv->default_device.device.Configuration().UsbInterfaces())
         {
             if (itf.InterfaceNumber() == iface)
@@ -1156,6 +1155,11 @@ static int winrt_set_interface_altsetting(libusb_device_handle *dev_handle, uint
                         static_cast<int>(altsetting)
                     );
                     return LIBUSB_ERROR_IO;
+                }
+
+                if (reclaim)
+                {
+                    return winrt_claim_interface(dev_handle, iface);
                 }
 
                 return LIBUSB_SUCCESS;
