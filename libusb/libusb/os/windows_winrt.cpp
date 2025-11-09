@@ -823,8 +823,26 @@ static int winrt_set_configuration(libusb_device_handle *dev_handle, int config)
         return LIBUSB_SUCCESS;
     }
 
-    // This is not supported by WinRT interfaces as far as I know - issuing a control transfer for this will fail
-	return LIBUSB_ERROR_NOT_SUPPORTED;
+    // Set the active configuration number
+    // This will likely not succeed, but there is nothing else that can be attempted
+    auto setupPacket = UsbSetupPacket();
+    setupPacket.RequestType().Direction(UsbTransferDirection::Out);
+    setupPacket.RequestType().ControlTransferType(UsbControlTransferType::Standard);
+    setupPacket.RequestType().Recipient(UsbControlRecipient::Device);
+    setupPacket.Request(LIBUSB_REQUEST_SET_CONFIGURATION);
+    setupPacket.Value(config);
+    setupPacket.Index(0);
+    setupPacket.Length(0);
+
+    int r = winrt_send_control_transfer_out(dev_handle->dev->ctx, priv->default_device.device, setupPacket);
+
+    if (r != LIBUSB_SUCCESS)
+    {
+        usbi_warn(dev_handle->dev->ctx, "Failed to set configuration to %i (%s)", config, libusb_error_name(r));
+        return r;
+    }
+
+	return LIBUSB_SUCCESS;
 }
 
 static void winrt_handle_interrupt(
