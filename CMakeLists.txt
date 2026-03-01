@@ -63,7 +63,9 @@ function(generate_config_file)
     endif()
 
     # Set vars that will be written into the config file.
-    if(WIN32)
+    if(WINDOWS_STORE OR WIN32_WINRT)
+        set(PLATFORM_CPP_STL 1)
+    elseif(WIN32)
         set(PLATFORM_WINDOWS 1)
     else()
         set(PLATFORM_POSIX 1)
@@ -174,7 +176,26 @@ target_include_directories(usb-1.0
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/libusb-1.0>
 )
 
-if(WIN32)
+if(WINDOWS_STORE OR WIN32_WINRT)
+    target_sources(usb-1.0 PRIVATE
+        "${LIBUSB_ROOT}/libusb-1.0.def"
+        "${LIBUSB_ROOT}/os/events_cpp_stl.cpp"
+        "${LIBUSB_ROOT}/os/events_cpp_stl.h"
+        "${LIBUSB_ROOT}/os/threads_cpp_stl.cpp"
+        "${LIBUSB_ROOT}/os/threads_cpp_stl.h"
+        "${LIBUSB_ROOT}/os/windows_winrt.cpp"
+        "${LIBUSB_ROOT}/os/windows_winrt.hpp"
+        $<$<C_COMPILER_ID:MSVC>:${LIBUSB_ROOT}/libusb-1.0.rc>
+    )
+    # C++17 or higher is needed for winrt
+    set_target_properties(usb-1.0 PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+    )
+    target_compile_definitions(usb-1.0 PRIVATE $<$<C_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS=1>)
+    target_link_libraries(usb-1.0 PRIVATE windowsapp)
+    set_target_properties(usb-1.0 PROPERTIES UNITY_BUILD OFF)
+elseif(WIN32)
     target_sources(usb-1.0 PRIVATE
         "${LIBUSB_ROOT}/libusb-1.0.def"
         "${LIBUSB_ROOT}/os/events_windows.c"
